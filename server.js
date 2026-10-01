@@ -4,6 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const { Chess } = require('chess.js');
+const crypto = require('crypto');
 
 const { sendVerificationCode, verifyCode, verifySupabaseToken, isSupabaseConfigured, supabase } = require('./supabaseClient');
 const {
@@ -115,14 +116,26 @@ app.use(express.static(path.join(__dirname, 'public'), { dotfiles: 'ignore' }));
 // STRICT ZOD REQUEST SCHEMAS & VALIDATOR
 // ------------------------------------------
 const sendCodeSchema = z.object({
-  email: z.string({ required_error: 'Email is required' }).trim().email('Invalid email address format').max(100),
-  username: z.string().trim().max(30).optional()
+  email: z.string({ required_error: 'Email is required' })
+    .trim()
+    .email('Invalid email address format')
+    .max(100)
+    .regex(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Malformed or invalid email address'),
+  username: z.string().trim().max(30).regex(/^[a-zA-Z0-9_\-\s]{1,30}$/, 'Username contains invalid characters').optional()
 });
 
 const verifyCodeSchema = z.object({
-  email: z.string({ required_error: 'Email is required' }).trim().email('Invalid email address format').max(100),
-  code: z.string({ required_error: 'Verification code is required' }).trim().min(4, 'Code must be at least 4 characters').max(10, 'Code too long'),
-  username: z.string().trim().max(30).optional()
+  email: z.string({ required_error: 'Email is required' })
+    .trim()
+    .email('Invalid email address format')
+    .max(100)
+    .regex(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Malformed or invalid email address'),
+  code: z.string({ required_error: 'Verification code is required' })
+    .trim()
+    .min(4, 'Code must be at least 4 characters')
+    .max(10, 'Code too long')
+    .regex(/^[0-9a-zA-Z]{4,10}$/, 'Invalid verification code format'),
+  username: z.string().trim().max(30).regex(/^[a-zA-Z0-9_\-\s]{1,30}$/, 'Username contains invalid characters').optional()
 });
 
 const guestSchema = z.object({
@@ -963,7 +976,7 @@ function setupSocketSecurity(socket) {
     }
 
     // 2. Action / Move-specific rate limiter: max 5 move packets per second
-    if (eventName === 'make_move') {
+    if (eventName === 'make_move' || eventName === 'makeMove') {
       moveCount++;
       if (moveCount > RATE_LIMIT_CONFIG.MAX_MOVES_PER_SEC) {
         socket.emit('rate_limit_warning', { error: 'Move action rate limit exceeded (maximum 5 moves per second).' });
@@ -1029,9 +1042,9 @@ function safeListener(socket, eventName, handler, schema = null) {
       if (eventName !== 'auth_session') {
         if (!socket.userId || !socket.user || socket.user.isGuest) {
           console.warn(`[Unauthorized Socket Event] Event '${eventName}' from unauthenticated/guest socket ${socket.id}`);
-          if (eventName === 'make_move') {
+          if (eventName === 'make_move' || eventName === 'makeMove') {
             socket.emit('move_rejected', { reason: 'Unauthorized: Verified account required.' });
-          } else if (eventName.includes('room')) {
+          } else if (eventName.toLowerCase().includes('room')) {
             socket.emit('room_error', { message: 'Unauthorized: Verified account required.' });
           } else {
             socket.emit('server_error', { message: 'Unauthorized: Verified account required.' });
@@ -1046,7 +1059,7 @@ function safeListener(socket, eventName, handler, schema = null) {
         if (!parseResult.success) {
           const errMsg = parseResult.error.issues.map(e => `${e.path.join('.') || 'payload'}: ${e.message}`).join(', ');
           console.warn(`[Socket Validation Rejected] Event '${eventName}' from ${socket.id}: ${errMsg}`);
-          if (eventName === 'make_move') {
+          if (eventName === 'make_move' || eventName === 'makeMove') {
             socket.emit('move_rejected', { reason: 'Malformed move payload: ' + errMsg });
           } else {
             socket.emit('server_error', { message: 'Invalid payload: ' + errMsg });
@@ -1129,16 +1142,35 @@ io.use(async (socket, next) => {
       return next(new Error('Unauthorized: Guest access has been permanently revoked. Please sign in with a verified account.'));
     }
 
-    // Associate every socket session directly with verified user.id
+    // Associate every socket session directly with verified user.id and profile
     socket.userId = user.id;
     socket.user = user;
+    socket.data.userId = user.id;
+    socket.data.user = user;
     socket.data.username = user.username;
+    socket.data.profile = getPublicProfile(user.id);
     next();
   } catch (err) {
     console.error(`[Socket Handshake Exception] from ${socket.id}:`, err.message);
     next(new Error('Authentication error: Unable to verify session token.'));
   }
 });
+
+// Rate limit room join attempts per IP to prevent room enumeration and brute-forcing (max 10 attempts per minute per IP)
+const roomJoinAttempts = new Map(); // ip -> [timestamps...]
+const ROOM_JOIN_WINDOW_MS = 60 * 1000;
+const MAX_ROOM_JOIN_PER_MIN = 10;
+
+function isRoomJoinRateLimited(ip) {
+  const now = Date.now();
+  const history = (roomJoinAttempts.get(ip) || []).filter(t => now - t < ROOM_JOIN_WINDOW_MS);
+  if (history.length >= MAX_ROOM_JOIN_PER_MIN) {
+    return true;
+  }
+  history.push(now);
+  roomJoinAttempts.set(ip, history);
+  return false;
+}
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -1175,7 +1207,10 @@ io.on('connection', (socket) => {
 
     socket.userId = user.id;
     socket.user = user;
+    socket.data.userId = user.id;
+    socket.data.user = user;
     socket.data.username = user.username;
+    socket.data.profile = getPublicProfile(user.id);
 
     socket.emit('auth_success', {
       profile: getPublicProfile(user.id),
@@ -1262,7 +1297,8 @@ io.on('connection', (socket) => {
   }, socketUsernameSchema);
 
   // Random 1v1 Matchmaking Queue (Elo + Secret Trust Factor)
-  safeListener(socket, 'join_matchmaking', async () => {
+  // Random 1v1 Matchmaking Queue (Elo + Secret Trust Factor)
+  const handleJoinMatchmaking = async () => {
     if (!socket.userId || !socket.user || socket.user.isGuest) {
       socket.emit('server_error', { message: 'Unauthorized: Verified account required to enter matchmaking.' });
       return;
@@ -1308,28 +1344,43 @@ io.on('connection', (socket) => {
 
     // Trigger immediate evaluation
     processMatchmakingQueue();
-  });
+  };
 
-  safeListener(socket, 'leave_matchmaking', () => {
+  safeListener(socket, 'join_matchmaking', handleJoinMatchmaking);
+  safeListener(socket, 'joinMatchmaking', handleJoinMatchmaking);
+
+  const handleLeaveMatchmaking = () => {
     const idx = matchmakingQueue.findIndex(q => q.socketId === socket.id);
     if (idx !== -1) {
       matchmakingQueue.splice(idx, 1);
-      console.log(`[Queue] ${socket.data.username} left queue.`);
+      console.log(`[Queue] ${socket.data.username || socket.userId} left queue.`);
     }
     socket.emit('queue_left');
     broadcastQueueStatus();
-  });
+  };
 
-  // Custom Room creation & joining
-  safeListener(socket, 'create_room', () => {
-    const roomCode = 'ROOM_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+  safeListener(socket, 'leave_matchmaking', handleLeaveMatchmaking);
+  safeListener(socket, 'leaveMatchmaking', handleLeaveMatchmaking);
+
+  // Custom Room creation & joining (Cryptographically secure high-entropy codes + IP rate limit)
+  const handleCreateRoom = () => {
+    const roomCode = crypto.randomBytes(5).toString('hex').toUpperCase(); // 10-char high-entropy alphanumeric
     socket.data.createdRoom = roomCode;
     socket.join(roomCode);
     socket.emit('room_created', { roomCode });
-    console.log(`[Room Created] ${roomCode} by ${socket.data.username}`);
-  });
+    console.log(`[Room Created] ${roomCode} by ${socket.data.username || socket.userId}`);
+  };
 
-  safeListener(socket, 'join_room', (roomCode) => {
+  safeListener(socket, 'create_room', handleCreateRoom);
+  safeListener(socket, 'createRoom', handleCreateRoom);
+
+  const handleJoinRoom = (roomCode) => {
+    const clientIp = socket.handshake.address || socket.conn?.remoteAddress || 'unknown';
+    if (isRoomJoinRateLimited(clientIp)) {
+      socket.emit('room_error', { message: 'Too many room join attempts. Please slow down to prevent room scanning.' });
+      return;
+    }
+
     if (typeof roomCode !== 'string' || !roomCode.trim()) {
       socket.emit('room_error', { message: 'Invalid room code format.' });
       return;
@@ -1354,10 +1405,13 @@ io.on('connection', (socket) => {
     if (hostSocket) {
       createGame(hostSocket, socket, cleanCode);
     }
-  }, socketJoinRoomSchema);
+  };
+
+  safeListener(socket, 'join_room', handleJoinRoom, socketJoinRoomSchema);
+  safeListener(socket, 'joinRoom', handleJoinRoom, socketJoinRoomSchema);
 
   // Making a Move (Strict Server-Side Validation)
-  safeListener(socket, 'make_move', (moveData) => {
+  const handleMakeMove = (moveData) => {
     const gameId = playerToGame[socket.id];
     const game = games[gameId];
 
@@ -1377,8 +1431,9 @@ io.on('connection', (socket) => {
     const playerColor = getPlayerColor(game, socket.id);
     const currentTurn = game.chess.turn();
 
-    if (playerColor !== currentTurn) {
-      socket.emit('move_rejected', { reason: 'Not your turn.' });
+    // Zero-Trust Check 1: Must be active player's turn AND socket's verified userId must match player
+    if (!playerColor || playerColor !== currentTurn || !game.players[playerColor] || game.players[playerColor].userId !== socket.userId) {
+      socket.emit('move_rejected', { reason: 'Not your turn or unauthorized player.' });
       return;
     }
 
@@ -1518,36 +1573,60 @@ io.on('connection', (socket) => {
       console.warn('[Move Rejected by Engine]', err.message);
       socket.emit('move_rejected', { reason: 'Illegal move rejected by server engine: ' + err.message });
     }
-  }, socketMoveSchema);
+  };
+
+  safeListener(socket, 'make_move', handleMakeMove, socketMoveSchema);
+  safeListener(socket, 'makeMove', handleMakeMove, socketMoveSchema);
 
   // Resignation
-  safeListener(socket, 'resign', () => {
+  const handleResign = () => {
     const gameId = playerToGame[socket.id];
     const game = games[gameId];
     if (!game || game.status !== 'in_progress') return;
 
     const playerColor = getPlayerColor(game, socket.id);
+    if (!playerColor) return;
     const winnerColor = getOpponentColor(playerColor);
 
     endGame(game, winnerColor, 'resignation', `${playerColor === 'w' ? 'White' : 'Black'} resigned.`);
-  });
+  };
 
-  // Draw Offer
-  safeListener(socket, 'offer_draw', () => {
+  safeListener(socket, 'resign', handleResign);
+
+  // Draw Offer with 30-Second Cooldown (Requirement 4)
+  const DRAW_OFFER_COOLDOWN_MS = 30000;
+
+  const handleOfferDraw = () => {
     const gameId = playerToGame[socket.id];
     const game = games[gameId];
     if (!game || game.status !== 'in_progress') return;
 
     const playerColor = getPlayerColor(game, socket.id);
+    if (!playerColor) return;
+    const player = game.players[playerColor];
+    if (!player) return;
+
+    const now = Date.now();
+    // Max 1 draw offer per 30 seconds to prevent rapid spamming & opponent UI freeze
+    if (player.lastDrawOfferTime && (now - player.lastDrawOfferTime < DRAW_OFFER_COOLDOWN_MS)) {
+      const waitSecs = Math.ceil((DRAW_OFFER_COOLDOWN_MS - (now - player.lastDrawOfferTime)) / 1000);
+      socket.emit('rate_limit_warning', { error: `Draw offer on cooldown. Please wait ${waitSecs}s before offering again.` });
+      return;
+    }
+    player.lastDrawOfferTime = now;
+
     const opponentColor = getOpponentColor(playerColor);
     const opponentSocket = io.sockets.sockets.get(game.players[opponentColor].id);
 
     if (opponentSocket) {
       opponentSocket.emit('draw_offered', { fromColor: playerColor });
     }
-  });
+  };
 
-  safeListener(socket, 'respond_draw', (data) => {
+  safeListener(socket, 'offer_draw', handleOfferDraw);
+  safeListener(socket, 'offerDraw', handleOfferDraw);
+
+  const handleRespondDraw = (data) => {
     const gameId = playerToGame[socket.id];
     const game = games[gameId];
     if (!game || game.status !== 'in_progress') return;
@@ -1557,15 +1636,19 @@ io.on('connection', (socket) => {
       endGame(game, null, 'draw_agreement', 'Players mutually agreed to a draw.');
     } else {
       const playerColor = getPlayerColor(game, socket.id);
+      if (!playerColor) return;
       const opponentColor = getOpponentColor(playerColor);
       const opponentSocket = io.sockets.sockets.get(game.players[opponentColor].id);
       if (opponentSocket) {
         opponentSocket.emit('draw_declined');
       }
     }
-  }, socketRespondDrawSchema);
+  };
 
-  // ADVANCED ANTI-CHEAT HANDLERS (With Timestamp & Rate Validation)
+  safeListener(socket, 'respond_draw', handleRespondDraw, socketRespondDrawSchema);
+  safeListener(socket, 'respondDraw', handleRespondDraw, socketRespondDrawSchema);
+
+  // Telemetry Audit Logger (Client strikes eliminated: Server alone calculates strikes & forfeits)
   safeListener(socket, 'anti_cheat_event', (data) => {
     if (!data || typeof data !== 'object') return;
     const gameId = playerToGame[socket.id];
@@ -1577,39 +1660,7 @@ io.on('connection', (socket) => {
     if (!color) return;
 
     const type = typeof data.type === 'string' ? data.type.substring(0, 50) : 'unknown_event';
-    const clientTimestamp = typeof data.timestamp === 'number' ? data.timestamp : Date.now();
-    const now = Date.now();
-
-    // Timestamp & Rate Validation (prevents client spoofing/replay attacks)
-    if (Math.abs(now - clientTimestamp) > 10000 || clientTimestamp < game.gameStartedAt) {
-      console.warn(`[Anti-Cheat Spoof Blocked] Timestamp anomaly from socket ${socket.id}`);
-      return;
-    }
-
-    const player = game.players[color];
-    if (player.lastReportedEventTime && (now - player.lastReportedEventTime < 3000)) {
-      return; // Rate limit reporting
-    }
-    player.lastReportedEventTime = now;
-
-    // Ignore tab blur / tab hidden to allow thinking time without false positives
-    if (type === 'tab_hidden' || type === 'window_blurred') return;
-
-    // Whitelist allowable client event categories
-    const allowedViolations = new Set([
-      'devtools_opened',
-      'clipboard_copy_attempt',
-      'clipboard_paste_attempt',
-      'unauthorized_dom_injection',
-      'synthetic_event_detected',
-      'timing_anomaly',
-      'superhuman_speed',
-      'excessive_tab_switch'
-    ]);
-
-    if (!allowedViolations.has(type)) return;
-
-    triggerAntiCheatViolation(game, color, type);
+    console.log(`[Telemetry Event Signal] Game ${game.id} | Player ${color}: ${type} (Logged for audit; client-reported strikes eliminated)`);
   }, socketAntiCheatEventSchema);
 
   safeListener(socket, 'anti_cheat_focus_lost', () => {
@@ -1800,11 +1851,11 @@ io.on('connection', (socket) => {
       const player = game.players[color];
       player.connected = false;
 
-      // Give 30 seconds for reconnection, then forfeit
+      // Give strict 45 seconds for reconnection, then forfeit (Requirement 3)
       io.to(game.id).emit('player_disconnected', {
         color,
         name: player.name,
-        reconnectWindow: 30
+        reconnectWindow: 45
       });
 
       player.disconnectTimer = setTimeout(() => {
@@ -1816,7 +1867,7 @@ io.on('connection', (socket) => {
             `${player.name} (${color === 'w' ? 'White' : 'Black'}) disconnected and abandoned the match.`
           );
         }
-      }, 30000);
+      }, 45000);
     }
   });
 });

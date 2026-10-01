@@ -59,10 +59,60 @@ function bElValid(el) {
   return el && el.parentNode && document.contains(el);
 }
 
+// ------------------------------------------
+// SAFE DOM & ZERO-XSS RENDERING UTILITIES
+// ------------------------------------------
+const svgParser = new DOMParser();
+
+function setPieceSvg(targetElement, svgMarkup) {
+  if (!targetElement) return;
+  targetElement.replaceChildren();
+  if (!svgMarkup || typeof svgMarkup !== 'string') return;
+  try {
+    const doc = svgParser.parseFromString(svgMarkup, 'image/svg+xml');
+    const svgEl = doc.querySelector('svg');
+    if (svgEl) {
+      targetElement.appendChild(document.importNode(svgEl, true));
+      return;
+    }
+  } catch (e) {}
+  targetElement.textContent = '';
+}
+
+function setButtonContent(btn, iconText, labelText) {
+  if (!btn) return;
+  btn.replaceChildren();
+  if (iconText) {
+    const span = document.createElement('span');
+    span.textContent = iconText + ' ';
+    btn.appendChild(span);
+  }
+  const textNode = document.createTextNode(labelText);
+  btn.appendChild(textNode);
+}
+
+// ------------------------------------------
+// ZERO-TRUST INPUT SANITIZERS (Injection Prevention)
+// ------------------------------------------
+function sanitizeUsername(input) {
+  if (typeof input !== 'string') return '';
+  return input.replace(/[<>'"`;(){}[\]\\/]/g, '').trim().substring(0, 30);
+}
+
+function sanitizeEmail(input) {
+  if (typeof input !== 'string') return '';
+  return input.replace(/[<>'"` \r\n\t]/g, '').trim().toLowerCase().substring(0, 100);
+}
+
+function sanitizeOtp(input) {
+  if (typeof input !== 'string') return '';
+  return input.replace(/\D/g, '').substring(0, 6);
+}
+
 function clearMountedBoard() {
   const container = document.getElementById('board-container');
   if (container) {
-    container.innerHTML = '';
+    container.replaceChildren();
   }
   boardEl = null;
 }
@@ -476,7 +526,7 @@ function startMatch(data) {
 
   // Clear move history
   recordedMoves = [];
-  moveHistoryEl.innerHTML = '';
+  moveHistoryEl.replaceChildren();
   moveCountEl.textContent = '0 moves';
   if (data.history && Array.isArray(data.history)) {
     data.history.forEach(m => addMoveToHistory(m));
@@ -584,7 +634,7 @@ function renderBoard() {
 
   isEngineRendering = true;
   try {
-    boardEl.innerHTML = '';
+    boardEl.replaceChildren();
     const fragment = document.createDocumentFragment();
 
     const effectiveFlipped = isFlipped;
@@ -698,7 +748,7 @@ function renderBoard() {
             if (selectedSquare === square) {
               pieceEl.classList.add('selected-piece');
             }
-            pieceEl.innerHTML = pieceSvg;
+            setPieceSvg(pieceEl, pieceSvg);
             pieceEl.dataset.square = square;
 
             // Drag-and-drop: can drag own pieces during turn OR to queue premove during opponent's turn
@@ -1115,13 +1165,13 @@ function attemptMove(from, to) {
 
 // Open Promotion Dialog Modal
 function openPromotionModal(color) {
-  promotionOptions.innerHTML = '';
+  promotionOptions.replaceChildren();
   const promoPieces = ['q', 'r', 'b', 'n'];
 
   promoPieces.forEach(p => {
     const opt = document.createElement('div');
     opt.className = 'promotion-opt';
-    opt.innerHTML = pieces[color + p];
+    setPieceSvg(opt, pieces[color + p]);
     opt.addEventListener('click', () => {
       promotionModal.classList.add('hidden');
       if (pendingPromotion) {
@@ -1384,11 +1434,12 @@ function updateCapturedAndAdvantage() {
 }
 
 function renderCapturedTray(element, pieceList, diffText) {
-  element.innerHTML = '';
+  if (!element) return;
+  element.replaceChildren();
   pieceList.forEach(code => {
     const iconSpan = document.createElement('span');
     iconSpan.className = 'piece-icon';
-    iconSpan.innerHTML = pieces[code];
+    setPieceSvg(iconSpan, pieces[code]);
     element.appendChild(iconSpan);
   });
   if (diffText) {
@@ -1777,7 +1828,7 @@ function startSendCodeCooldown(durationSeconds = 60) {
   if (btnSendCode) {
     btnSendCode.disabled = true;
     btnSendCode.classList.add('disabled');
-    btnSendCode.innerHTML = `<span>⏳</span> Resend in ${sendCodeCooldownSeconds}s`;
+    setButtonContent(btnSendCode, '⏳', `Resend in ${sendCodeCooldownSeconds}s`);
   }
   if (sendCodeCooldownTimer) clearInterval(sendCodeCooldownTimer);
   sendCodeCooldownTimer = setInterval(() => {
@@ -1788,12 +1839,12 @@ function startSendCodeCooldown(durationSeconds = 60) {
       if (btnSendCode) {
         btnSendCode.disabled = false;
         btnSendCode.classList.remove('disabled');
-        btnSendCode.innerHTML = '<span>📧</span> Send 6-Digit Verification Code';
+        setButtonContent(btnSendCode, '📧', 'Send 6-Digit Verification Code');
       }
     } else {
       if (btnSendCode) {
         btnSendCode.disabled = true;
-        btnSendCode.innerHTML = `<span>⏳</span> Resend in ${sendCodeCooldownSeconds}s`;
+        setButtonContent(btnSendCode, '⏳', `Resend in ${sendCodeCooldownSeconds}s`);
       }
     }
   }, 1000);
@@ -1823,8 +1874,8 @@ function startResendCountdown() {
 }
 
 async function sendAuthCode() {
-  const email = inputAuthEmail.value.trim();
-  const username = inputAuthUsername.value.trim() || 'Grandmaster';
+  const email = sanitizeEmail(inputAuthEmail.value);
+  const username = sanitizeUsername(inputAuthUsername.value) || 'Grandmaster';
 
   if (!email || !email.includes('@')) {
     showAuthMsg(authMsgStep1, 'Please enter a valid email address.', 'error');
@@ -1842,7 +1893,7 @@ async function sendAuthCode() {
   lastSendAttemptTimestamp = now;
   // Immediately disable button upon click and start visual 60s cooldown (Requirement 2)
   btnSendCode.disabled = true;
-  btnSendCode.innerHTML = '<span>⏳</span> Sending Code...';
+  setButtonContent(btnSendCode, '⏳', 'Sending Code...');
   startSendCodeCooldown(60);
 
   try {
@@ -1876,9 +1927,9 @@ async function sendAuthCode() {
 }
 
 async function verifyAuthCode() {
-  const email = inputAuthEmail.value.trim();
-  const code = inputAuthOtp.value.trim();
-  const username = inputAuthUsername.value.trim() || 'Grandmaster';
+  const email = sanitizeEmail(inputAuthEmail.value);
+  const code = sanitizeOtp(inputAuthOtp.value);
+  const username = sanitizeUsername(inputAuthUsername.value) || 'Grandmaster';
 
   if (!code || code.length < 4) {
     showAuthMsg(authMsgStep2, 'Please enter the 6-digit code.', 'error');
@@ -1886,7 +1937,7 @@ async function verifyAuthCode() {
   }
 
   btnVerifyCode.disabled = true;
-  btnVerifyCode.innerHTML = '<span>⏳</span> Verifying...';
+  setButtonContent(btnVerifyCode, '⏳', 'Verifying...');
 
   try {
     const res = await fetch('/api/auth/verify-code', {
@@ -1920,7 +1971,7 @@ async function verifyAuthCode() {
     showAuthMsg(authMsgStep2, 'Verification error. Please try again.', 'error');
   } finally {
     btnVerifyCode.disabled = false;
-    btnVerifyCode.innerHTML = '<span>✓</span> Verify Code & Continue';
+    setButtonContent(btnVerifyCode, '✓', 'Verify Code & Continue');
   }
 }
 
@@ -1938,7 +1989,7 @@ async function acceptTermsAndEnter() {
   }
 
   btnMandatoryAgree.disabled = true;
-  btnMandatoryAgree.innerHTML = '<span>⏳</span> Recording Agreement...';
+  setButtonContent(btnMandatoryAgree, '⏳', 'Recording Agreement...');
 
   try {
     const res = await fetch('/api/auth/accept-terms', {
@@ -1962,7 +2013,7 @@ async function acceptTermsAndEnter() {
     showAuthMsg(authMsgStep3, 'Network error. Please try again.', 'error');
   } finally {
     btnMandatoryAgree.disabled = false;
-    btnMandatoryAgree.innerHTML = '<span>🛡️</span> I Understand & Agree • Enter Stadium';
+    setButtonContent(btnMandatoryAgree, '🛡️', 'I Understand & Agree • Enter Stadium');
   }
 }
 
@@ -2130,17 +2181,35 @@ if (btnChangeEmail) {
 }
 if (btnResendCode) {
   btnResendCode.addEventListener('click', () => {
-    if (otpCountdownSeconds <= 0) sendAuthCode();
+    if (otpCountdownSeconds <= 0) {
+      startResendCountdown();
+      sendAuthCode();
+    }
   });
 }
 if (btnSignOut) btnSignOut.addEventListener('click', signOut);
 
+// Real-time input sanitization handlers (Zero-Trust client sanitization)
+if (inputAuthUsername) {
+  inputAuthUsername.addEventListener('input', (e) => {
+    const clean = sanitizeUsername(e.target.value);
+    if (clean !== e.target.value) e.target.value = clean;
+  });
+}
 if (inputAuthEmail) {
+  inputAuthEmail.addEventListener('input', (e) => {
+    const clean = sanitizeEmail(e.target.value);
+    if (clean !== e.target.value) e.target.value = clean;
+  });
   inputAuthEmail.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendAuthCode();
   });
 }
 if (inputAuthOtp) {
+  inputAuthOtp.addEventListener('input', (e) => {
+    const clean = sanitizeOtp(e.target.value);
+    if (clean !== e.target.value) e.target.value = clean;
+  });
   inputAuthOtp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') verifyAuthCode();
   });
