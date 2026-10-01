@@ -49,10 +49,10 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
 function isOriginAllowed(origin) {
   if (!origin) return true; // Same-origin, direct browser requests, cURL/tests
   if (ALLOWED_ORIGINS.includes(origin)) return true;
-  // Allow any dynamic trycloudflare.com tunnel URL in non-production
-  if (process.env.NODE_ENV !== 'production' && /\.trycloudflare\.com$/.test(origin)) {
-    return true;
-  }
+  // Dynamic cloud domains: Render, Cloudflare tunnels, localhost
+  if (/\.onrender\.com$/i.test(origin)) return true;
+  if (/\.trycloudflare\.com$/i.test(origin)) return true;
+  if (process.env.RENDER_EXTERNAL_URL && origin.startsWith(process.env.RENDER_EXTERNAL_URL)) return true;
   return false;
 }
 
@@ -68,7 +68,11 @@ const io = new Server(server, {
     },
     credentials: true
   },
-  maxHttpBufferSize: 1e5 // 100 KB max buffer to prevent memory exhaustion DoS
+  pingInterval: 10000,
+  pingTimeout: 5000,
+  connectTimeout: 20000,
+  maxHttpBufferSize: 32 * 1024, // 32 KB max buffer to prevent payload spam memory spikes
+  perMessageDeflate: false // Disable per-message deflate to eliminate CPU compression overhead on rapid tiny chess packets
 });
 
 const PORT = process.env.PORT || 3000;
@@ -480,7 +484,7 @@ function startGameTimer(game) {
   game.lastTurnTimestamp = Date.now();
   let syncCounter = 0;
 
-  // 100ms High-Precision Server Clock Loop (eliminates flag-fall latency)
+  // 250ms High-Efficiency Server Clock Loop (eliminates event-loop lag spikes)
   game.timerInterval = setInterval(() => {
     if (game.status !== 'in_progress') {
       clearInterval(game.timerInterval);
@@ -497,7 +501,7 @@ function startGameTimer(game) {
     if (activePlayer) {
       activePlayer.timeRemaining = Math.max(0, activePlayer.timeRemaining - elapsed);
 
-      // Instant millisecond flag-fall
+      // Instant flag-fall
       if (activePlayer.timeRemaining <= 0) {
         const winner = getOpponentColor(currentTurn);
         endGame(game, winner, 'timeout', `${currentTurn === 'w' ? 'White' : 'Black'} ran out of time.`);
@@ -506,15 +510,15 @@ function startGameTimer(game) {
     }
 
     syncCounter++;
-    // Broadcast clock sync every 1 second (10 x 100ms)
-    if (syncCounter % 10 === 0) {
+    // Broadcast clock sync once every second (4 x 250ms)
+    if (syncCounter % 4 === 0) {
       io.to(game.id).emit('time_sync', {
         whiteTime: game.players.w.timeRemaining,
         blackTime: game.players.b.timeRemaining,
         turn: game.chess.turn()
       });
     }
-  }, 100);
+  }, 250);
 }
 
 function endGame(game, winnerColor, reason, details) {
@@ -550,6 +554,18 @@ function endGame(game, winnerColor, reason, details) {
     details: details,
     fen: game.chess.fen()
   });
+
+  // Automatic Memory Garbage Collection: Prune finished games from RAM after 3 minutes
+  const gameIdToClean = game.id;
+  setTimeout(() => {
+    try {
+      if (games[gameIdToClean] && games[gameIdToClean].status === 'ended') {
+        if (game.players?.w) delete playerToGame[game.players.w.id];
+        if (game.players?.b) delete playerToGame[game.players.b.id];
+        delete games[gameIdToClean];
+      }
+    } catch (e) {}
+  }, 3 * 60 * 1000);
 }
 
 function triggerAntiCheatViolation(game, color, type) {
@@ -1289,8 +1305,8 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`[Socket Disconnected] ${socket.id}`);
 
-    // Remove from queue
-    const qIdx = matchmakingQueue.indexOf(socket.id);
+    // Remove from queue cleanly
+    const qIdx = matchmakingQueue.findIndex(q => q.socketId === socket.id);
     if (qIdx !== -1) {
       matchmakingQueue.splice(qIdx, 1);
       broadcastQueueStatus();
@@ -1326,6 +1342,34 @@ io.on('connection', (socket) => {
     }
   });
 });
+
+// Periodic Garbage Collector: Prunes stale/abandoned matches and zombie memory every 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const gameId in games) {
+    const game = games[gameId];
+    if (!game) continue;
+
+    // Prune completed games older than 3 minutes
+    if (game.status === 'ended') {
+      if (game.players?.w) delete playerToGame[game.players.w.id];
+      if (game.players?.b) delete playerToGame[game.players.b.id];
+      delete games[gameId];
+      continue;
+    }
+
+    // Prune abandoned games where both players disconnected for > 60 seconds
+    const wConnected = game.players?.w?.connected;
+    const bConnected = game.players?.b?.connected;
+    if (!wConnected && !bConnected) {
+      console.log(`[Memory GC] Auto-pruning abandoned match: ${gameId}`);
+      endGame(game, null, 'abandoned', 'Both players disconnected and abandoned the match.');
+      if (game.players?.w) delete playerToGame[game.players.w.id];
+      if (game.players?.b) delete playerToGame[game.players.b.id];
+      delete games[gameId];
+    }
+  }
+}, 2 * 60 * 1000);
 
 // Global Process Crash Protection: Ensure unexpected exceptions never bring down the server
 process.on('uncaughtException', (err) => {

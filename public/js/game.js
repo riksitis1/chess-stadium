@@ -495,139 +495,141 @@ function renderBoard() {
   isEngineRendering = true;
   try {
     boardEl.innerHTML = '';
+    const fragment = document.createDocumentFragment();
 
-  const effectiveFlipped = isFlipped;
-  const ranks = effectiveFlipped ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
-  const files = effectiveFlipped ? ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'] : ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    const effectiveFlipped = isFlipped;
+    const ranks = effectiveFlipped ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
+    const files = effectiveFlipped ? ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'] : ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 
-  const inCheck = chess.inCheck();
-  let kingSquareInCheck = null;
+    const inCheck = chess.inCheck();
+    let kingSquareInCheck = null;
 
-  if (inCheck) {
-    const turn = chess.turn();
-    for (const r of [1, 2, 3, 4, 5, 6, 7, 8]) {
-      for (const f of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
-        const sq = f + r;
-        const p = chess.get(sq);
-        if (p && p.type === 'k' && p.color === turn) {
-          kingSquareInCheck = sq;
-          break;
+    if (inCheck) {
+      const turn = chess.turn();
+      for (const r of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        for (const f of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+          const sq = f + r;
+          const p = chess.get(sq);
+          if (p && p.type === 'k' && p.color === turn) {
+            kingSquareInCheck = sq;
+            break;
+          }
         }
       }
     }
-  }
 
-  const currentActiveTurn = (gameStatus === 'in_progress') ? playerColor : chess.turn();
+    const currentActiveTurn = (gameStatus === 'in_progress') ? playerColor : chess.turn();
 
-  for (let rIdx = 0; rIdx < 8; rIdx++) {
-    for (let fIdx = 0; fIdx < 8; fIdx++) {
-      const rank = ranks[rIdx];
-      const file = files[fIdx];
-      const square = file + rank;
+    for (let rIdx = 0; rIdx < 8; rIdx++) {
+      for (let fIdx = 0; fIdx < 8; fIdx++) {
+        const rank = ranks[rIdx];
+        const file = files[fIdx];
+        const square = file + rank;
 
-      const squareEl = document.createElement('div');
-      squareEl.className = 'square';
-      squareEl.dataset.square = square;
+        const squareEl = document.createElement('div');
+        squareEl.className = 'square';
+        squareEl.dataset.square = square;
 
-      // Checker board coloring: (fileNum + rank)
-      const fileNum = file.charCodeAt(0) - 'a'.charCodeAt(0);
-      const isLight = (fileNum + (rank - 1)) % 2 !== 0;
-      squareEl.classList.add(isLight ? 'light' : 'dark');
+        // Checker board coloring: (fileNum + rank)
+        const fileNum = file.charCodeAt(0) - 'a'.charCodeAt(0);
+        const isLight = (fileNum + (rank - 1)) % 2 !== 0;
+        squareEl.classList.add(isLight ? 'light' : 'dark');
 
-      // Rank Coordinates on the left edge (fIdx === 0)
-      if (fIdx === 0) {
-        const rankLabel = document.createElement('span');
-        rankLabel.className = 'coord-label coord-rank';
-        rankLabel.textContent = rank;
-        squareEl.appendChild(rankLabel);
-      }
-      // File Coordinates on the bottom edge (rIdx === 7)
-      if (rIdx === 7) {
-        const fileLabel = document.createElement('span');
-        fileLabel.className = 'coord-label coord-file';
-        fileLabel.textContent = file;
-        squareEl.appendChild(fileLabel);
-      }
-
-      // Last move highlight
-      if (lastMove && (lastMove.from === square || lastMove.to === square)) {
-        squareEl.classList.add(isLight ? 'last-move-light' : 'last-move-dark');
-      }
-
-      // Pre-move highlight (Chess.com coral/crimson style)
-      if (currentPremove) {
-        if (currentPremove.from === square) {
-          squareEl.classList.add('premove-src');
-        } else if (currentPremove.to === square) {
-          squareEl.classList.add('premove-dst');
+        // Rank Coordinates on the left edge (fIdx === 0)
+        if (fIdx === 0) {
+          const rankLabel = document.createElement('span');
+          rankLabel.className = 'coord-label coord-rank';
+          rankLabel.textContent = rank;
+          squareEl.appendChild(rankLabel);
         }
-      }
+        // File Coordinates on the bottom edge (rIdx === 7)
+        if (rIdx === 7) {
+          const fileLabel = document.createElement('span');
+          fileLabel.className = 'coord-label coord-file';
+          fileLabel.textContent = file;
+          squareEl.appendChild(fileLabel);
+        }
 
-      // Selected square highlight
-      if (selectedSquare === square) {
-        squareEl.classList.add('selected');
-      }
+        // Last move highlight
+        if (lastMove && (lastMove.from === square || lastMove.to === square)) {
+          squareEl.classList.add(isLight ? 'last-move-light' : 'last-move-dark');
+        }
 
-      // King in Check pulse
-      if (kingSquareInCheck === square) {
-        squareEl.classList.add('in-check');
-      }
+        // Pre-move highlight (Chess.com coral/crimson style)
+        if (currentPremove) {
+          if (currentPremove.from === square) {
+            squareEl.classList.add('premove-src');
+          } else if (currentPremove.to === square) {
+            squareEl.classList.add('premove-dst');
+          }
+        }
 
-      const pieceData = chess.get(square);
+        // Selected square highlight
+        if (selectedSquare === square) {
+          squareEl.classList.add('selected');
+        }
 
-      if (pieceData && pieceData.color === currentActiveTurn) {
-        squareEl.classList.add('has-friendly');
-      }
+        // King in Check pulse
+        if (kingSquareInCheck === square) {
+          squareEl.classList.add('in-check');
+        }
 
-      // ==========================================
-      // LEGAL MOVE DOTS & CAPTURE TARGET RINGS
-      // ==========================================
-      const isLegalMove = legalMoves.some(m => m.to === square);
-      if (isLegalMove) {
+        const pieceData = chess.get(square);
+
+        if (pieceData && pieceData.color === currentActiveTurn) {
+          squareEl.classList.add('has-friendly');
+        }
+
+        // ==========================================
+        // LEGAL MOVE DOTS & CAPTURE TARGET RINGS
+        // ==========================================
+        const isLegalMove = legalMoves.some(m => m.to === square);
+        if (isLegalMove) {
+          if (pieceData) {
+            // Capturable Enemy Piece: Crimson Target Ring
+            const captureRing = document.createElement('div');
+            captureRing.className = 'move-hint-capture';
+            squareEl.appendChild(captureRing);
+          } else {
+            // Vacant Legal Destination: Glowing Emerald Dot
+            const moveDot = document.createElement('div');
+            moveDot.className = 'move-hint-dot';
+            squareEl.appendChild(moveDot);
+          }
+        }
+
+        // Piece rendering with Premium SVG
         if (pieceData) {
-          // Capturable Enemy Piece: Crimson Target Ring
-          const captureRing = document.createElement('div');
-          captureRing.className = 'move-hint-capture';
-          squareEl.appendChild(captureRing);
-        } else {
-          // Vacant Legal Destination: Glowing Emerald Dot
-          const moveDot = document.createElement('div');
-          moveDot.className = 'move-hint-dot';
-          squareEl.appendChild(moveDot);
-        }
-      }
+          const pieceCode = pieceData.color + pieceData.type;
+          const pieceSvg = pieces[pieceCode];
+          if (pieceSvg) {
+            const pieceEl = document.createElement('div');
+            pieceEl.className = 'piece';
+            if (selectedSquare === square) {
+              pieceEl.classList.add('selected-piece');
+            }
+            pieceEl.innerHTML = pieceSvg;
+            pieceEl.dataset.square = square;
 
-      // Piece rendering with Premium SVG
-      if (pieceData) {
-        const pieceCode = pieceData.color + pieceData.type;
-        const pieceSvg = pieces[pieceCode];
-        if (pieceSvg) {
-          const pieceEl = document.createElement('div');
-          pieceEl.className = 'piece';
-          if (selectedSquare === square) {
-            pieceEl.classList.add('selected-piece');
+            // Drag-and-drop: can drag own pieces during turn OR to queue premove during opponent's turn
+            const canDrag = (gameStatus === 'in_progress' && pieceData.color === playerColor) ||
+                            (gameStatus !== 'in_progress');
+            if (canDrag) {
+              pieceEl.setAttribute('draggable', 'true');
+              setupDragAndDrop(pieceEl, square);
+              setupTouchDrag(pieceEl, square);
+            }
+
+            squareEl.appendChild(pieceEl);
           }
-          pieceEl.innerHTML = pieceSvg;
-          pieceEl.dataset.square = square;
-
-          // Drag-and-drop: can drag own pieces during turn OR to queue premove during opponent's turn
-          const canDrag = (gameStatus === 'in_progress' && pieceData.color === playerColor) ||
-                          (gameStatus !== 'in_progress');
-          if (canDrag) {
-            pieceEl.setAttribute('draggable', 'true');
-            setupDragAndDrop(pieceEl, square);
-            setupTouchDrag(pieceEl, square);
-          }
-
-          squareEl.appendChild(pieceEl);
         }
-      }
 
-      boardEl.appendChild(squareEl);
+        fragment.appendChild(squareEl);
+      }
     }
-  }
 
-  updateCapturedAndAdvantage();
+    boardEl.appendChild(fragment);
+    updateCapturedAndAdvantage();
   } finally {
     isEngineRendering = false;
   }
@@ -636,8 +638,11 @@ function renderBoard() {
 let draggedFromSquare = null;
 let isMoveInFlight = false;
 let activeTouchDrag = null;
+let touchRafPending = false;
+let currentTouchX = 0;
+let currentTouchY = 0;
 
-// Touch Drag Support for Mobile & Tablets
+// Touch Drag Support for Mobile & Tablets (Hardware-Accelerated 120fps)
 function setupTouchDrag(pieceEl, fromSquare) {
   pieceEl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
@@ -648,11 +653,9 @@ function setupTouchDrag(pieceEl, fromSquare) {
     const rect = pieceEl.getBoundingClientRect();
     const ghostEl = pieceEl.cloneNode(true);
     ghostEl.classList.add('touch-drag-avatar');
-    ghostEl.style.position = 'fixed';
-    ghostEl.style.left = `${touch.clientX - rect.width / 2}px`;
-    ghostEl.style.top = `${touch.clientY - rect.height / 2}px`;
     ghostEl.style.width = `${rect.width}px`;
     ghostEl.style.height = `${rect.height}px`;
+    ghostEl.style.transform = `translate3d(${touch.clientX - rect.width / 2}px, ${touch.clientY - rect.height / 2}px, 0)`;
     document.body.appendChild(ghostEl);
 
     pieceEl.classList.add('touch-dragging');
@@ -660,7 +663,9 @@ function setupTouchDrag(pieceEl, fromSquare) {
     activeTouchDrag = {
       pieceEl,
       fromSquare,
-      ghostEl
+      ghostEl,
+      width: rect.width,
+      height: rect.height
     };
 
     e.preventDefault();
@@ -670,12 +675,19 @@ function setupTouchDrag(pieceEl, fromSquare) {
 window.addEventListener('touchmove', (e) => {
   if (!activeTouchDrag) return;
   const touch = e.touches[0];
-  const ghost = activeTouchDrag.ghostEl;
-  if (ghost) {
-    const width = parseFloat(ghost.style.width) || 60;
-    const height = parseFloat(ghost.style.height) || 60;
-    ghost.style.left = `${touch.clientX - width / 2}px`;
-    ghost.style.top = `${touch.clientY - height / 2}px`;
+  currentTouchX = touch.clientX;
+  currentTouchY = touch.clientY;
+
+  if (!touchRafPending) {
+    touchRafPending = true;
+    requestAnimationFrame(() => {
+      touchRafPending = false;
+      if (!activeTouchDrag || !activeTouchDrag.ghostEl) return;
+      const ghost = activeTouchDrag.ghostEl;
+      const w = activeTouchDrag.width || 60;
+      const h = activeTouchDrag.height || 60;
+      ghost.style.transform = `translate3d(${currentTouchX - w / 2}px, ${currentTouchY - h / 2}px, 0)`;
+    });
   }
   e.preventDefault();
 }, { passive: false });
@@ -2077,6 +2089,13 @@ function initDevtoolsDetection() {
 
 // Initialize on DOM Ready
 document.addEventListener('DOMContentLoaded', () => {
+  // Mobile & Cross-Device AudioContext Pre-Warm (unlocks procedural sound buffers on first gesture)
+  ['click', 'touchstart', 'keydown'].forEach(evt => {
+    window.addEventListener(evt, () => {
+      sounds.init();
+    }, { once: true, passive: true });
+  });
+
   initSocket();
   renderBoard();
   initDomIntegrityObserver();
