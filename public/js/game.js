@@ -39,7 +39,33 @@ let oppStrikes = 0;
 let isTabFocused = true;
 
 // DOM Elements
-const boardEl = document.getElementById('chess-board');
+const boardContainer = document.getElementById('board-container');
+let boardEl = null;
+
+function getOrCreateBoardElement() {
+  const container = document.getElementById('board-container');
+  if (!container) return null;
+  boardEl = document.getElementById('chess-board');
+  if (!bElValid(boardEl)) {
+    boardEl = document.createElement('div');
+    boardEl.id = 'chess-board';
+    boardEl.className = 'chess-board';
+    container.appendChild(boardEl);
+  }
+  return boardEl;
+}
+
+function bElValid(el) {
+  return el && el.parentNode && document.contains(el);
+}
+
+function clearMountedBoard() {
+  const container = document.getElementById('board-container');
+  if (container) {
+    container.innerHTML = '';
+  }
+  boardEl = null;
+}
 const panelLobby = document.getElementById('panel-lobby');
 const panelGame = document.getElementById('panel-game');
 
@@ -347,6 +373,16 @@ function initSocket(token) {
     alert('Draw offer was declined.');
   });
 
+  // Server-Anchored Focus Telemetry Challenge (Requirement 3)
+  socket.on('telemetry_challenge', (data) => {
+    if (data && data.challengeId) {
+      socket.emit('telemetry_response', {
+        challengeId: data.challengeId,
+        clientTime: Date.now()
+      });
+    }
+  });
+
   // Anti-Cheat Events from Server
   socket.on('anti_cheat_strike', (data) => {
     handleAntiCheatStrike(data);
@@ -536,6 +572,16 @@ function updateClockDisplays() {
 
 // Render Chessboard (8x8 Checker Board Green and White with Coordinates and Move Dots)
 function renderBoard() {
+  // Requirement 4: Mount chessboard & pieces dynamically ONLY after user session and agreement are verified!
+  if (!currentUser || !currentUser.id || !currentUser.accepted_terms) {
+    clearMountedBoard();
+    return;
+  }
+
+  const bEl = getOrCreateBoardElement();
+  if (!bEl) return;
+  boardEl = bEl;
+
   isEngineRendering = true;
   try {
     boardEl.innerHTML = '';
@@ -804,53 +850,55 @@ function setupDragAndDrop(pieceEl, fromSquare) {
   });
 }
 
-// Setup board square drop listeners
-boardEl.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-});
+// Setup board square drop listeners on boardContainer for dynamic mount stability
+if (boardContainer) {
+  boardContainer.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
 
-boardEl.addEventListener('drop', (e) => {
-  e.preventDefault();
-  if (!e.isTrusted) {
-    reportAntiCheatEvent('synthetic_event_detected');
-    return;
-  }
-  const targetSquareEl = e.target.closest('.square');
-  const from = e.dataTransfer.getData('text/plain') || draggedFromSquare;
-  if (targetSquareEl && from) {
-    const to = targetSquareEl.dataset.square;
-    if (from !== to) {
-      if (gameStatus === 'in_progress' && chess.turn() !== playerColor) {
-        // Pre-move via drag-and-drop!
-        const piece = chess.get(from);
-        if (piece && piece.color === playerColor) {
-          currentPremove = { from, to, promotion: 'q' };
-          clearSelection();
-          renderBoard();
-          sounds.playSelect();
+  boardContainer.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (!e.isTrusted) {
+      reportAntiCheatEvent('synthetic_event_detected');
+      return;
+    }
+    const targetSquareEl = e.target.closest('.square');
+    const from = e.dataTransfer.getData('text/plain') || draggedFromSquare;
+    if (targetSquareEl && from) {
+      const to = targetSquareEl.dataset.square;
+      if (from !== to) {
+        if (gameStatus === 'in_progress' && chess.turn() !== playerColor) {
+          // Pre-move via drag-and-drop!
+          const piece = chess.get(from);
+          if (piece && piece.color === playerColor) {
+            currentPremove = { from, to, promotion: 'q' };
+            clearSelection();
+            renderBoard();
+            sounds.playSelect();
+          }
+        } else {
+          attemptMove(from, to);
         }
-      } else {
-        attemptMove(from, to);
       }
     }
-  }
-});
+  });
 
-// Single Unified Click Delegation on Chess Board (Never drops clicks on SVG or children)
-boardEl.addEventListener('click', (e) => {
-  if (!e.isTrusted) {
-    console.warn('[Anti-Cheat] Synthetic click blocked!');
-    reportAntiCheatEvent('synthetic_event_detected');
-    return;
-  }
-  const squareEl = e.target.closest('.square');
-  if (!squareEl) return;
-  const square = squareEl.dataset.square;
-  if (square) {
-    handleSquareClick(square);
-  }
-});
+  // Single Unified Click Delegation on Chess Board Container
+  boardContainer.addEventListener('click', (e) => {
+    if (!e.isTrusted) {
+      console.warn('[Anti-Cheat] Synthetic click blocked!');
+      reportAntiCheatEvent('synthetic_event_detected');
+      return;
+    }
+    const squareEl = e.target.closest('.square');
+    if (!squareEl) return;
+    const square = squareEl.dataset.square;
+    if (square) {
+      handleSquareClick(square);
+    }
+  });
+}
 
 // Clear highlights without DOM destruction
 function clearSelection() {
@@ -858,6 +906,8 @@ function clearSelection() {
   try {
     selectedSquare = null;
     legalMoves = [];
+    if (!boardEl) boardEl = document.getElementById('chess-board');
+    if (!boardEl) return;
     boardEl.querySelectorAll('.square.selected').forEach(el => el.classList.remove('selected'));
     boardEl.querySelectorAll('.piece.selected-piece').forEach(el => el.classList.remove('selected-piece'));
     boardEl.querySelectorAll('.move-hint-dot, .move-hint-capture').forEach(el => el.remove());
@@ -1668,6 +1718,7 @@ function closeAuthModal() {
 }
 
 function lockAppForUnauthenticated() {
+  clearMountedBoard();
   if (appContainer) {
     appContainer.setAttribute('inert', '');
     appContainer.classList.add('auth-locked');
@@ -1699,7 +1750,9 @@ function showAuthStep(step) {
 function completeAuthentication(token, profile) {
   updateCurrentUser(profile);
   unlockApp();
-  initSocket(token);
+  renderBoard(); // Dynamic board mounting post-auth verification (Requirement 4)
+  initDomIntegrityObserver();
+  initSocket(token); // Establish socket connection post-auth only (Requirement 1)
 }
 
 function openProfileModal() {
@@ -1711,6 +1764,39 @@ function openProfileModal() {
 
 function closeProfileModal() {
   if (profileModal) profileModal.classList.add('hidden');
+}
+
+// Strict 60-Second OTP Send Cooldown Timer (Requirement 2)
+let sendCodeCooldownTimer = null;
+let sendCodeCooldownSeconds = 0;
+let lastSendAttemptTimestamp = 0;
+const SEND_COOLDOWN_MS = 60 * 1000;
+
+function startSendCodeCooldown(durationSeconds = 60) {
+  sendCodeCooldownSeconds = durationSeconds;
+  if (btnSendCode) {
+    btnSendCode.disabled = true;
+    btnSendCode.classList.add('disabled');
+    btnSendCode.innerHTML = `<span>⏳</span> Resend in ${sendCodeCooldownSeconds}s`;
+  }
+  if (sendCodeCooldownTimer) clearInterval(sendCodeCooldownTimer);
+  sendCodeCooldownTimer = setInterval(() => {
+    sendCodeCooldownSeconds--;
+    if (sendCodeCooldownSeconds <= 0) {
+      clearInterval(sendCodeCooldownTimer);
+      sendCodeCooldownTimer = null;
+      if (btnSendCode) {
+        btnSendCode.disabled = false;
+        btnSendCode.classList.remove('disabled');
+        btnSendCode.innerHTML = '<span>📧</span> Send 6-Digit Verification Code';
+      }
+    } else {
+      if (btnSendCode) {
+        btnSendCode.disabled = true;
+        btnSendCode.innerHTML = `<span>⏳</span> Resend in ${sendCodeCooldownSeconds}s`;
+      }
+    }
+  }, 1000);
 }
 
 function startResendCountdown() {
@@ -1745,8 +1831,19 @@ async function sendAuthCode() {
     return;
   }
 
+  const now = Date.now();
+  // Anti-looping guard: block console click loops immediately
+  if (sendCodeCooldownSeconds > 0 || (now - lastSendAttemptTimestamp < SEND_COOLDOWN_MS)) {
+    const remaining = Math.max(sendCodeCooldownSeconds, Math.ceil((SEND_COOLDOWN_MS - (now - lastSendAttemptTimestamp)) / 1000));
+    showAuthMsg(authMsgStep1, `Please wait ${remaining}s before requesting another verification code.`, 'error');
+    return;
+  }
+
+  lastSendAttemptTimestamp = now;
+  // Immediately disable button upon click and start visual 60s cooldown (Requirement 2)
   btnSendCode.disabled = true;
   btnSendCode.innerHTML = '<span>⏳</span> Sending Code...';
+  startSendCodeCooldown(60);
 
   try {
     const res = await fetch('/api/auth/send-code', {
@@ -1755,6 +1852,13 @@ async function sendAuthCode() {
       body: JSON.stringify({ email, username })
     });
     const data = await res.json();
+
+    if (res.status === 429 || data.rateLimited) {
+      const retrySecs = data.retryAfterSeconds || 60;
+      startSendCodeCooldown(retrySecs);
+      showAuthMsg(authMsgStep1, data.error || `Rate limit reached. Please wait ${retrySecs}s.`, 'error');
+      return;
+    }
 
     if (data.success) {
       showAuthStep('otp');
@@ -1767,10 +1871,8 @@ async function sendAuthCode() {
     }
   } catch (err) {
     showAuthMsg(authMsgStep1, 'Network error. Please try again.', 'error');
-  } finally {
-    btnSendCode.disabled = false;
-    btnSendCode.innerHTML = '<span>📧</span> Send 6-Digit Verification Code';
   }
+  // Button remains disabled under startSendCodeCooldown timer!
 }
 
 async function verifyAuthCode() {
@@ -1796,13 +1898,17 @@ async function verifyAuthCode() {
 
     if (data.success && data.profile) {
       currentUser = data.profile;
-      localStorage.setItem('chess_auth_token', data.token);
+      const sessionToken = data.session?.access_token || data.token;
+      localStorage.setItem('chess_auth_token', sessionToken);
       localStorage.setItem('chess_auth_user', JSON.stringify(data.profile));
+      if (data.session) {
+        localStorage.setItem('chess_auth_session', JSON.stringify(data.session));
+      }
 
       // Check if user has already accepted the Privacy & Fair-Play Agreement
       if (data.profile.accepted_terms) {
         localStorage.setItem('chess_accepted_terms', 'true');
-        completeAuthentication(data.token, data.profile);
+        completeAuthentication(sessionToken, data.profile);
       } else {
         // Proceed to mandatory Step 3: Privacy & Fair-Play Agreement Gate
         showAuthStep('terms');
@@ -1863,6 +1969,7 @@ async function acceptTermsAndEnter() {
 function signOut() {
   localStorage.removeItem('chess_auth_token');
   localStorage.removeItem('chess_auth_user');
+  localStorage.removeItem('chess_auth_session');
   localStorage.removeItem('chess_accepted_terms');
   currentUser = null;
   if (socket) {
@@ -1870,6 +1977,7 @@ function signOut() {
     socket = null;
   }
   closeProfileModal();
+  clearMountedBoard();
   lockAppForUnauthenticated();
 }
 
@@ -2256,7 +2364,10 @@ function initDomIntegrityObserver() {
     }
   });
 
-  observer.observe(boardEl, { childList: true, subtree: true });
+  const target = document.getElementById('chess-board') || document.getElementById('board-container');
+  if (target) {
+    observer.observe(target, { childList: true, subtree: true });
+  }
 }
 
 // DevTools, Console & Anti-Tamper Security Shield
@@ -2300,8 +2411,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }, { once: true, passive: true });
   });
 
-  renderBoard();
-  initDomIntegrityObserver();
+  // Dynamic Board Mounting (Requirement 4):
+  // Board and pieces are NOT mounted on page load.
+  // They are mounted dynamically ONLY after user session and agreement are verified in completeAuthentication()!
   initDevtoolsDetection();
   checkInitialAuth();
 });

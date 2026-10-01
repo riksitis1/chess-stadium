@@ -69,9 +69,10 @@ async function runUsernameTests() {
   testAssert(caseInsensitiveRes.status === 409, 'Case-insensitive duplicate username strictly rejected with HTTP 409 Conflict');
 
   // Original owner (Player A) CAN log in with their own email and username
+  const testIp = `198.51.100.${Date.now() % 240 + 10}`;
   const ownerSendRes = await fetch(`${BASE_URL}/api/auth/send-code`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': testIp },
     body: JSON.stringify({
       email: `player_a_${uniqueTag}@gmail.com`, // Same owner
       username: targetUsername

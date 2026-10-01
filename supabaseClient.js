@@ -220,6 +220,7 @@ async function verifyCode(email, token, username) {
       const simulatedId = 'usr_' + crypto.createHash('sha256').update(normalizedEmail).digest('hex').slice(0, 16);
       return {
         success: true,
+        session: { access_token: simulatedId },
         user: {
           id: simulatedId,
           email: normalizedEmail,
@@ -264,9 +265,29 @@ async function verifyCode(email, token, username) {
   }
 }
 
+/**
+ * Validate Supabase JWT token directly against Supabase Auth API
+ */
+async function verifySupabaseToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const clean = token.trim();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.auth.getUser(clean);
+      if (!error && data && data.user) {
+        return data.user;
+      }
+    } catch (err) {
+      console.warn('[Supabase Auth] Token verification error:', err.message);
+    }
+  }
+  return null;
+}
+
 module.exports = {
   supabase,
   isSupabaseConfigured,
   sendVerificationCode,
-  verifyCode
+  verifyCode,
+  verifySupabaseToken
 };

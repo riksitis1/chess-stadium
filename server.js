@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 const path = require('path');
 const { Chess } = require('chess.js');
 
-const { sendVerificationCode, verifyCode } = require('./supabaseClient');
+const { sendVerificationCode, verifyCode, verifySupabaseToken, isSupabaseConfigured, supabase } = require('./supabaseClient');
 const {
   getUserById,
   getUserByEmail,
@@ -175,6 +175,11 @@ const socketHeartbeatSchema = z.object({
   timestamp: z.number().optional()
 }).nullable().optional();
 
+const socketTelemetryResponseSchema = z.object({
+  challengeId: z.string().trim().min(3).max(64),
+  clientTime: z.number().optional()
+});
+
 // Middleware factory for strict request validation
 function validateRequest(schemas) {
   return (req, res, next) => {
@@ -258,11 +263,68 @@ function createIpRateLimiter({ windowMs, maxRequests, message }) {
   };
 }
 
-const sendCodeIpLimiter = createIpRateLimiter({
-  windowMs: 10 * 60 * 1000, // 10 minutes
-  maxRequests: 30,
-  message: 'Too many verification code requests from this network. Please wait a few minutes before trying again.'
-});
+// Strict IP-Based OTP Rate Limiter (Requirement 2):
+// Max 1 request per 60 seconds and max 5 requests per hour per IP. Returns 429 Too Many Requests safely.
+function createOtpIpRateLimiter() {
+  const ipShortMap = new Map();  // ip -> timestamp of last request (60s cooldown)
+  const ipHourlyMap = new Map(); // ip -> [timestamps...] (max 5/hr quota)
+  const SHORT_WINDOW_MS = 60 * 1000;
+  const HOURLY_WINDOW_MS = 60 * 60 * 1000;
+  const MAX_HOURLY = 5;
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, ts] of ipShortMap.entries()) {
+      if (now - ts > SHORT_WINDOW_MS) ipShortMap.delete(ip);
+    }
+    for (const [ip, arr] of ipHourlyMap.entries()) {
+      const valid = arr.filter(t => now - t < HOURLY_WINDOW_MS);
+      if (valid.length === 0) ipHourlyMap.delete(ip);
+      else ipHourlyMap.set(ip, valid);
+    }
+  }, 5 * 60 * 1000);
+
+  return (req, res, next) => {
+    const ip = getClientIp(req);
+    const now = Date.now();
+
+    // 1. Check 60-second limit (max 1 request per 60 seconds per IP)
+    const lastRequest = ipShortMap.get(ip);
+    if (lastRequest && (now - lastRequest < SHORT_WINDOW_MS)) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((SHORT_WINDOW_MS - (now - lastRequest)) / 1000));
+      res.setHeader('Retry-After', retryAfterSeconds);
+      return res.status(429).json({
+        success: false,
+        rateLimited: true,
+        retryAfterSeconds,
+        error: `Rate limit exceeded: Only 1 verification code request allowed per 60 seconds per IP. Please wait ${retryAfterSeconds}s.`
+      });
+    }
+
+    // 2. Check 1-hour limit (max 5 requests per hour per IP)
+    const hourlyHistory = (ipHourlyMap.get(ip) || []).filter(t => now - t < HOURLY_WINDOW_MS);
+    if (hourlyHistory.length >= MAX_HOURLY) {
+      const oldest = hourlyHistory[0];
+      const retryAfterSeconds = Math.max(1, Math.ceil((oldest + HOURLY_WINDOW_MS - now) / 1000));
+      res.setHeader('Retry-After', retryAfterSeconds);
+      return res.status(429).json({
+        success: false,
+        rateLimited: true,
+        retryAfterSeconds,
+        error: `Hourly rate limit exceeded: Maximum 5 verification code requests per hour per IP. Please wait before requesting another code.`
+      });
+    }
+
+    // Record request timestamp
+    ipShortMap.set(ip, now);
+    hourlyHistory.push(now);
+    ipHourlyMap.set(ip, hourlyHistory);
+
+    next();
+  };
+}
+
+const sendCodeIpLimiter = createOtpIpRateLimiter();
 
 const verifyCodeIpLimiter = createIpRateLimiter({
   windowMs: 10 * 60 * 1000, // 10 minutes
@@ -281,22 +343,26 @@ const guestAuthIpLimiter = createIpRateLimiter({
 // ------------------------------------------
 
 // 1. Send OTP 6-digit verification code to email (Gmail via Supabase)
-app.post('/api/auth/send-code', sendCodeIpLimiter, validateRequest({ body: sendCodeSchema }), async (req, res) => {
+app.post('/api/auth/send-code', validateRequest({ body: sendCodeSchema }), (req, res, next) => {
+  const { email, username } = req.body;
+
+  // Enforce Username Uniqueness first: reject duplicate handles before consuming rate limiter quota
+  if (username && typeof username === 'string') {
+    const cleanUsername = username.trim();
+    const existingUser = getUserByUsername(cleanUsername);
+    if (existingUser && (!existingUser.email || existingUser.email.toLowerCase() !== email.trim().toLowerCase())) {
+      return res.status(409).json({
+        success: false,
+        error: `Username "${cleanUsername}" is already taken by another player. Please choose a different username.`
+      });
+    }
+  }
+
+  // Then apply strict IP rate limiter before dispatching OTP code (Requirement 2)
+  sendCodeIpLimiter(req, res, next);
+}, async (req, res) => {
   try {
     const { email, username } = req.body;
-
-    // Enforce Username Uniqueness: prevent 2 users with the same username
-    if (username && typeof username === 'string') {
-      const cleanUsername = username.trim();
-      const existingUser = getUserByUsername(cleanUsername);
-      if (existingUser && (!existingUser.email || existingUser.email.toLowerCase() !== email.trim().toLowerCase())) {
-        return res.status(409).json({
-          success: false,
-          error: `Username "${cleanUsername}" is already taken by another player. Please choose a different username.`
-        });
-      }
-    }
-
     const result = await sendVerificationCode(email, username);
     if (result.rateLimited) {
       if (result.retryAfterSeconds) res.setHeader('Retry-After', result.retryAfterSeconds);
@@ -358,9 +424,12 @@ app.post('/api/auth/verify-code', verifyCodeIpLimiter, validateRequest({ body: v
       maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
     });
 
+    const sessionToken = result.session?.access_token || user.id;
+
     res.json({
       success: true,
-      token: user.id,
+      token: sessionToken,
+      session: result.session || { access_token: sessionToken },
       profile: getPrivateProfile(user.id)
     });
   } catch (err) {
@@ -486,6 +555,7 @@ function createGame(player1Socket, player2Socket, roomCode = null) {
     turn: 'w',
     timerInterval: null,
     lastTurnTimestamp: null,
+    currentTurnStartedAt: Date.now(),
     gameStartedAt: Date.now(),
     players: {
       w: {
@@ -500,7 +570,9 @@ function createGame(player1Socket, player2Socket, roomCode = null) {
         awaySince: null,
         connected: true,
         moveDurations: [],
-        suspiciousCount: 0
+        suspiciousCount: 0,
+        serverBlurDuration: 0,
+        activeChallenge: null
       },
       b: {
         id: blackSocket.id,
@@ -514,7 +586,9 @@ function createGame(player1Socket, player2Socket, roomCode = null) {
         awaySince: null,
         connected: true,
         moveDurations: [],
-        suspiciousCount: 0
+        suspiciousCount: 0,
+        serverBlurDuration: 0,
+        activeChallenge: null
       }
     },
     moves: [],
@@ -560,6 +634,7 @@ function startGameTimer(game) {
   if (game.timerInterval) clearInterval(game.timerInterval);
 
   game.lastTurnTimestamp = Date.now();
+  game.currentTurnStartedAt = Date.now();
   let syncCounter = 0;
 
   // 250ms High-Efficiency Server Clock Loop (eliminates event-loop lag spikes)
@@ -588,6 +663,7 @@ function startGameTimer(game) {
     }
 
     syncCounter++;
+
     // Broadcast clock sync once every second (4 x 250ms)
     if (syncCounter % 4 === 0) {
       io.to(game.id).emit('time_sync', {
@@ -595,6 +671,44 @@ function startGameTimer(game) {
         blackTime: game.players.b.timeRemaining,
         turn: game.chess.turn()
       });
+    }
+
+    // Periodic Server-Side Challenge/Response Focus Telemetry (Requirement 3: every 2s)
+    if (syncCounter % 8 === 0 && activePlayer) {
+      const activeSocket = io.sockets.sockets.get(activePlayer.id);
+
+      // If previous challenge was not answered within expected bounds during their turn
+      if (activePlayer.activeChallenge && (now - activePlayer.activeChallenge.sentAt > 2000)) {
+        const missedDuration = now - activePlayer.activeChallenge.sentAt;
+        activePlayer.serverBlurDuration = (activePlayer.serverBlurDuration || 0) + 2000;
+        activePlayer.isFocused = false;
+        console.warn(`[Focus Telemetry] Challenge timeout for ${activePlayer.name} (${currentTurn}). Server blur: ${activePlayer.serverBlurDuration}ms.`);
+
+        io.to(game.id).emit('anti_cheat_focus_lost', {
+          playerColor: currentTurn,
+          playerName: activePlayer.name,
+          awayTimeout: Math.max(1, Math.ceil((15000 - activePlayer.serverBlurDuration) / 1000))
+        });
+
+        if (activePlayer.serverBlurDuration >= 15000) {
+          const oppColor = getOpponentColor(currentTurn);
+          triggerAntiCheatViolation(game, currentTurn, 'excessive_tab_switch');
+          endGame(
+            game,
+            oppColor,
+            'abandonment',
+            `${activePlayer.name} (${currentTurn === 'w' ? 'White' : 'Black'}) was detected away/unfocused for 15 seconds by server telemetry and forfeited.`
+          );
+          return;
+        }
+      }
+
+      // Dispatch new unique challenge ID to active player
+      const challengeId = `ch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      activePlayer.activeChallenge = { id: challengeId, sentAt: now };
+      if (activeSocket && activeSocket.connected) {
+        activeSocket.emit('telemetry_challenge', { challengeId, timestamp: now });
+      }
     }
   }, 250);
 }
@@ -662,7 +776,9 @@ function triggerAntiCheatViolation(game, color, type) {
     'clipboard_paste_attempt': 'Engine Move Paste Attempt Blocked',
     'unauthorized_dom_injection': 'DOM Mutation / Cheat Extension Injected',
     'synthetic_event_detected': 'Automated Bot Synthetic Click (isTrusted=false)',
-    'timing_anomaly': 'Robotic Engine Timing Variance Detected'
+    'timing_anomaly': 'Robotic Engine Timing Variance Detected (stdDev < 0.3s)',
+    'superhuman_speed': 'Superhuman Move Speed (< 150ms in Complex Position)',
+    'excessive_tab_switch': 'Tab Inactive / Focus Latency Exceeded 15s'
   };
 
   const violationName = violationDescriptions[type] || type;
@@ -682,6 +798,8 @@ function triggerAntiCheatViolation(game, color, type) {
   if (userId) {
     let penalty = -15;
     if (type === 'timing_anomaly') penalty = -30;
+    else if (type === 'superhuman_speed') penalty = -35;
+    else if (type === 'excessive_tab_switch') penalty = -25;
     else if (type === 'unauthorized_dom_injection') penalty = -25;
     else if (type === 'clipboard_paste_attempt') penalty = -20;
     adjustSecretTrustFactor(userId, penalty, type);
@@ -945,35 +1063,81 @@ function safeListener(socket, eventName, handler, schema = null) {
   });
 }
 
-// Strict WebSocket Connection Handshake Authentication Guard (Requirement 3)
-io.use((socket, next) => {
-  const cookies = parseCookies({ headers: socket.handshake.headers });
-  const token = socket.handshake.auth?.token ||
-                socket.handshake.headers?.authorization?.replace('Bearer ', '') ||
-                socket.handshake.query?.token ||
-                cookies.chess_session;
+// Strict WebSocket Connection Handshake Authentication Guard via Supabase JWT (Requirement 1)
+io.use(async (socket, next) => {
+  try {
+    const cookies = parseCookies({ headers: socket.handshake.headers });
+    const token = socket.handshake.auth?.token ||
+                  socket.handshake.headers?.authorization?.replace('Bearer ', '') ||
+                  socket.handshake.query?.token ||
+                  cookies.chess_session;
 
-  if (!token || typeof token !== 'string') {
-    console.warn(`[Socket Handshake Blocked] Unauthenticated connection attempt without token from ${socket.id}`);
-    return next(new Error('Authentication required: Valid session token must be provided in handshake.'));
+    if (!token || typeof token !== 'string') {
+      console.warn(`[Socket Handshake Blocked] Unauthenticated connection attempt without token from ${socket.id}`);
+      return next(new Error('Authentication required: Valid session token must be provided in handshake.'));
+    }
+
+    const cleanToken = token.trim();
+    let verifiedUserId = null;
+    let verifiedEmail = null;
+    let verifiedUsername = null;
+
+    // 1. Validate Supabase JWT token via Supabase Auth API
+    if (cleanToken.includes('.') && isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase.auth.getUser(cleanToken);
+        if (error || !data || !data.user) {
+          console.warn(`[Socket Handshake Blocked] Supabase JWT validation rejected from ${socket.id}:`, error?.message || 'User not found');
+          return next(new Error('Authentication failed: Missing, expired, or invalid Supabase authentication token.'));
+        }
+        verifiedUserId = data.user.id;
+        verifiedEmail = data.user.email;
+        verifiedUsername = data.user.user_metadata?.username;
+      } catch (jwtErr) {
+        console.warn(`[Socket Handshake Blocked] Supabase JWT validation error:`, jwtErr.message);
+        return next(new Error('Authentication failed: Missing, expired, or invalid Supabase authentication token.'));
+      }
+    } else {
+      // Local session token / simulator token
+      const localUser = getUserById(cleanToken);
+      if (localUser) {
+        verifiedUserId = localUser.id;
+        verifiedEmail = localUser.email;
+        verifiedUsername = localUser.username;
+      } else {
+        console.warn(`[Socket Handshake Blocked] Invalid/expired token provided from ${socket.id}: ${cleanToken}`);
+        return next(new Error('Authentication failed: Invalid or expired session token.'));
+      }
+    }
+
+    // 2. Fetch or create persistent user record
+    let user = getUserById(verifiedUserId);
+    if (!user && verifiedEmail) {
+      user = getUserByEmail(verifiedEmail);
+    }
+    if (!user && verifiedUserId) {
+      user = await createOrUpdateUser({
+        id: verifiedUserId,
+        email: verifiedEmail,
+        username: verifiedUsername || 'Player',
+        isGuest: false
+      });
+    }
+
+    if (!user || user.isGuest) {
+      console.warn(`[Socket Handshake Blocked] Guest account rejected from ${socket.id}: ${verifiedUserId}`);
+      return next(new Error('Unauthorized: Guest access has been permanently revoked. Please sign in with a verified account.'));
+    }
+
+    // Associate every socket session directly with verified user.id
+    socket.userId = user.id;
+    socket.user = user;
+    socket.data.username = user.username;
+    next();
+  } catch (err) {
+    console.error(`[Socket Handshake Exception] from ${socket.id}:`, err.message);
+    next(new Error('Authentication error: Unable to verify session token.'));
   }
-
-  const user = getUserById(token.trim());
-  if (!user) {
-    console.warn(`[Socket Handshake Blocked] Invalid/expired token provided from ${socket.id}: ${token}`);
-    return next(new Error('Authentication failed: Invalid or expired session token.'));
-  }
-
-  if (user.isGuest) {
-    console.warn(`[Socket Handshake Blocked] Guest account rejected from ${socket.id}: ${user.id}`);
-    return next(new Error('Unauthorized: Guest access has been permanently revoked. Please sign in with a verified account.'));
-  }
-
-  // Bind verified user account to socket
-  socket.userId = user.id;
-  socket.user = user;
-  socket.data.username = user.username;
-  next();
 });
 
 // Socket.io connection handling
@@ -1220,7 +1384,8 @@ io.on('connection', (socket) => {
 
     const player = game.players[playerColor];
     const now = Date.now();
-    const moveElapsed = game.lastTurnTimestamp ? (now - game.lastTurnTimestamp) : 2000;
+    const turnStart = game.currentTurnStartedAt || game.lastTurnTimestamp || now;
+    const moveElapsed = Math.max(0, now - turnStart);
 
     // Advanced Telemetry Anti-Cheat Analysis (Safe property access)
     if (moveData && moveData.telemetry && typeof moveData.telemetry === 'object') {
@@ -1243,21 +1408,34 @@ io.on('connection', (socket) => {
     if (player) {
       player.moveDurations.push(moveElapsed);
 
-      // Server-Side Move Timing Logging (Requirement 4)
-      console.log(`[Fair-Play Timing Log] Game: ${game.id} | Move #${game.moves.length + 1} | Player: ${player.name} (${playerColor}) | Elapsed: ${moveElapsed}ms`);
+      // Server-Side Move Timing Logging: timestamp_move - timestamp_turn_start (Requirement 3)
+      console.log(`[Fair-Play Timing Log] Game: ${game.id} | Move #${game.moves.length + 1} | Player: ${player.name} (${playerColor}) | Elapsed: ${(moveElapsed / 1000).toFixed(3)}s (${moveElapsed}ms)`);
 
-      // Continuous Robotic Timing Uniformity Check (Bot Signature)
-      // Detects fixed robotic delays (e.g., taking consistently ~3.0s with near-zero stdDev)
-      if (player.moveDurations.length >= 4) {
-        const recent = player.moveDurations.slice(-5);
+      // 1. Robotic Uniform Timing Check (stdDev < 0.3s across 10+ turns)
+      if (player.moveDurations.length >= 10) {
+        const recent = player.moveDurations.slice(-10);
         const mean = recent.reduce((sum, val) => sum + val, 0) / recent.length;
         const variance = recent.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / recent.length;
         const stdDev = Math.sqrt(variance);
 
-        if (mean > 400 && stdDev < 35) {
-          console.warn(`[Anti-Cheat Variance Detection] Robotic timing signature: mean=${mean.toFixed(1)}ms, stdDev=${stdDev.toFixed(1)}ms across ${recent.length} moves.`);
+        if (stdDev < 300) {
+          console.warn(`[Anti-Cheat Alert] Robotic uniform timing detected for account ${player.userId} (${player.name}): stdDev=${(stdDev / 1000).toFixed(3)}s (< 0.3s) across ${recent.length} turns (mean=${(mean / 1000).toFixed(3)}s)`);
           triggerAntiCheatViolation(game, playerColor, 'timing_anomaly');
+          if (player.userId) {
+            adjustSecretTrustFactor(player.userId, -30, 'robotic_timing_uniformity');
+          }
           player.moveDurations = []; // Reset window
+        }
+      }
+
+      // 2. Superhuman Speed Check (< 150ms for complex tactical positions)
+      const legalMovesCount = game.chess.moves().length;
+      const isComplexPosition = game.moves.length >= 4 && legalMovesCount >= 10;
+      if (moveElapsed < 150 && isComplexPosition) {
+        console.warn(`[Anti-Cheat Alert] Superhuman speed detected for account ${player.userId} (${player.name}): ${moveElapsed}ms (< 150ms) in complex position with ${legalMovesCount} legal moves`);
+        triggerAntiCheatViolation(game, playerColor, 'superhuman_speed');
+        if (player.userId) {
+          adjustSecretTrustFactor(player.userId, -35, 'superhuman_move_speed');
         }
       }
     }
@@ -1299,6 +1477,7 @@ io.on('connection', (socket) => {
 
       player.timeRemaining = Math.max(0, player.timeRemaining - effectiveElapsed);
       game.lastTurnTimestamp = Date.now();
+      game.currentTurnStartedAt = Date.now();
 
       if (player.timeRemaining <= 0) {
         const winner = getOpponentColor(playerColor);
@@ -1423,7 +1602,9 @@ io.on('connection', (socket) => {
       'clipboard_paste_attempt',
       'unauthorized_dom_injection',
       'synthetic_event_detected',
-      'timing_anomaly'
+      'timing_anomaly',
+      'superhuman_speed',
+      'excessive_tab_switch'
     ]);
 
     if (!allowedViolations.has(type)) return;
@@ -1542,6 +1723,61 @@ io.on('connection', (socket) => {
 
     socket.emit('heartbeat_ack', { serverTime: now });
   }, socketHeartbeatSchema);
+
+  // Server-Anchored Focus Telemetry Response Handler (Requirement 3)
+  safeListener(socket, 'telemetry_response', (data) => {
+    const gameId = playerToGame[socket.id];
+    const game = games[gameId];
+    if (!game || game.status !== 'in_progress') return;
+
+    const color = getPlayerColor(game, socket.id);
+    const player = game.players[color];
+    if (!player || !player.activeChallenge) return;
+
+    if (data && data.challengeId === player.activeChallenge.id) {
+      const now = Date.now();
+      const rtt = now - player.activeChallenge.sentAt;
+      player.lastHeartbeatLatency = rtt;
+      player.activeChallenge = null;
+
+      if (rtt < 1200) {
+        // Returned within expected bounds
+        if (player.serverBlurDuration > 0) {
+          player.serverBlurDuration = Math.max(0, player.serverBlurDuration - 2000);
+        }
+        if (!player.isFocused && player.serverBlurDuration === 0) {
+          player.isFocused = true;
+          io.to(game.id).emit('anti_cheat_focus_restored', {
+            playerColor: color,
+            playerName: player.name
+          });
+        }
+      } else {
+        // Latency spike during turn: calculate blur time on server
+        const spike = rtt - 600;
+        player.serverBlurDuration = (player.serverBlurDuration || 0) + spike;
+        player.isFocused = false;
+        console.warn(`[Focus Telemetry Hardening] Heartbeat latency spike for ${player.name} (${color}): ${rtt}ms. Server blur duration: ${player.serverBlurDuration}ms.`);
+
+        io.to(game.id).emit('anti_cheat_focus_lost', {
+          playerColor: color,
+          playerName: player.name,
+          awayTimeout: Math.max(1, Math.ceil((15000 - player.serverBlurDuration) / 1000))
+        });
+
+        if (player.serverBlurDuration >= 15000) {
+          const oppColor = getOpponentColor(color);
+          triggerAntiCheatViolation(game, color, 'excessive_tab_switch');
+          endGame(
+            game,
+            oppColor,
+            'abandonment',
+            `${player.name} (${color === 'w' ? 'White' : 'Black'}) was detected away/unfocused for 15 seconds by server telemetry and forfeited.`
+          );
+        }
+      }
+    }
+  }, socketTelemetryResponseSchema);
 
   // Disconnection
   socket.on('disconnect', () => {
