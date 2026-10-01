@@ -15,17 +15,20 @@ async function runDrawsAndClockTest() {
 
   // Test 1: Reconnection within 30-second window
   console.log('--- Test 1: 30-Second Reconnection Window & State Recovery ---');
+  const reconTag = Date.now();
+  const reconWhiteName = `ReconWhite_${reconTag}`;
+  const reconBlackName = `ReconBlack_${reconTag}`;
   const user1 = await createOrUpdateUser({
-    id: `usr_recon1_${Date.now()}`,
-    email: `recon1_${Date.now()}@test.local`,
-    username: 'ReconWhite',
+    id: `usr_recon1_${reconTag}`,
+    email: `recon1_${reconTag}@test.local`,
+    username: reconWhiteName,
     isGuest: false,
     accepted_terms: true
   });
   const user2 = await createOrUpdateUser({
-    id: `usr_recon2_${Date.now()}`,
-    email: `recon2_${Date.now()}@test.local`,
-    username: 'ReconBlack',
+    id: `usr_recon2_${reconTag}`,
+    email: `recon2_${reconTag}@test.local`,
+    username: reconBlackName,
     isGuest: false,
     accepted_terms: true
   });
@@ -39,8 +42,8 @@ async function runDrawsAndClockTest() {
   s1.on('auth_success', d => { actualUser1Id = d.token; });
   s2.on('auth_success', d => { actualUser2Id = d.token; });
 
-  s1.emit('auth_session', { userId: user1.id, username: 'ReconWhite' });
-  s2.emit('auth_session', { userId: user2.id, username: 'ReconBlack' });
+  s1.emit('auth_session', { userId: user1.id, username: reconWhiteName });
+  s2.emit('auth_session', { userId: user2.id, username: reconBlackName });
 
   while (!actualUser1Id || !actualUser2Id) {
     await wait(50);
@@ -94,7 +97,7 @@ async function runDrawsAndClockTest() {
     reconnectedMatchData = data;
   });
 
-  sReconnected.emit('auth_session', { userId: whiteUserId, username: 'ReconWhite' });
+  sReconnected.emit('auth_session', { userId: whiteUserId, username: reconWhiteName });
 
   let waits = 0;
   while (!reconnectedMatchData && waits < 40) {

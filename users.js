@@ -90,6 +90,30 @@ function getUserByEmail(email) {
 }
 
 /**
+ * Get user by username (case-insensitive)
+ */
+function getUserByUsername(username) {
+  if (!username || typeof username !== 'string') return null;
+  const normalized = username.trim().toLowerCase();
+  if (!normalized) return null;
+
+  for (const user of usersCache.values()) {
+    if (user.username && user.username.trim().toLowerCase() === normalized) {
+      return user;
+    }
+  }
+  if (fs.existsSync(USERS_FILE)) {
+    loadUsersFromDisk();
+    for (const user of usersCache.values()) {
+      if (user.username && user.username.trim().toLowerCase() === normalized) {
+        return user;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Create or update a persistent user account
  */
 async function createOrUpdateUser({ id, email, username, isGuest = false, accepted_terms = false }) {
@@ -97,35 +121,55 @@ async function createOrUpdateUser({ id, email, username, isGuest = false, accept
     const normalizedEmail = email ? email.trim().toLowerCase() : null;
     let user = id ? getUserById(id) : (normalizedEmail ? getUserByEmail(normalizedEmail) : null);
 
-  if (!user) {
-    const newId = id || (isGuest ? 'gst_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6) : 'usr_' + Date.now());
-    user = {
-      id: newId,
-      email: normalizedEmail || `guest_${newId}@chess.local`,
-      username: username || (isGuest ? `Guest_${newId.slice(-4)}` : 'Grandmaster'),
-      elo: 1200, // Standard Chess.com starting Elo
-      highestElo: 1200,
-      trustFactor: 100, // Hidden secret trust factor (0 to 100)
-      isGuest: Boolean(isGuest),
-      accepted_terms: Boolean(accepted_terms),
-      gamesPlayed: 0,
-      wins: 0,
-      losses: 0,
-      draws: 0,
-      recentMatches: [],
-      createdAt: Date.now(),
-      lastSeenAt: Date.now()
-    };
-    usersCache.set(user.id, user);
-  } else {
-    // Update existing user fields
-    if (username && username.trim()) user.username = username.trim();
-    if (normalizedEmail) user.email = normalizedEmail;
-    if (accepted_terms !== undefined && accepted_terms !== null) user.accepted_terms = Boolean(accepted_terms);
-    user.lastSeenAt = Date.now();
-  }
+    const cleanUsername = (username && typeof username === 'string') ? username.trim() : null;
 
-  saveUsersToDisk();
+    // Enforce Username Uniqueness: prevent 2 users having the same username
+    if (cleanUsername) {
+      const existingWithUsername = getUserByUsername(cleanUsername);
+      if (existingWithUsername) {
+        const isSame = (user && existingWithUsername.id === user.id) ||
+                       (id && existingWithUsername.id === id) ||
+                       (normalizedEmail && existingWithUsername.email && existingWithUsername.email.toLowerCase() === normalizedEmail);
+        if (!isSame) {
+          const err = new Error(`Username "${cleanUsername}" is already taken by another player. Please choose a different username.`);
+          err.code = 'USERNAME_TAKEN';
+          err.status = 409;
+          throw err;
+        }
+      }
+    }
+
+    if (!user) {
+      const newId = id || (isGuest ? 'gst_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6) : 'usr_' + Date.now());
+      user = {
+        id: newId,
+        email: normalizedEmail || `guest_${newId}@chess.local`,
+        username: cleanUsername || (isGuest ? `Guest_${newId.slice(-4)}` : `Player_${newId.slice(-4)}`),
+        elo: 1200, // Standard Chess.com starting Elo
+        highestElo: 1200,
+        trustFactor: 100, // Hidden secret trust factor (0 to 100)
+        isGuest: Boolean(isGuest),
+        accepted_terms: Boolean(accepted_terms),
+        gamesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        recentMatches: [],
+        createdAt: Date.now(),
+        lastSeenAt: Date.now()
+      };
+      usersCache.set(user.id, user);
+    } else {
+      // Re-fetch current reference from cache in case loadUsersFromDisk updated instances
+      user = usersCache.get(user.id) || user;
+      if (cleanUsername) user.username = cleanUsername;
+      if (normalizedEmail) user.email = normalizedEmail;
+      if (accepted_terms !== undefined && accepted_terms !== null) user.accepted_terms = Boolean(accepted_terms);
+      user.lastSeenAt = Date.now();
+      usersCache.set(user.id, user);
+    }
+
+    saveUsersToDisk();
 
   // Async sync to Supabase database if configured
   if (supabase && !user.isGuest) {
@@ -329,6 +373,7 @@ function getPrivateProfile(userId) {
 module.exports = {
   getUserById,
   getUserByEmail,
+  getUserByUsername,
   createOrUpdateUser,
   calculateEloChange,
   recordMatchOutcome,

@@ -9,6 +9,7 @@ const { sendVerificationCode, verifyCode } = require('./supabaseClient');
 const {
   getUserById,
   getUserByEmail,
+  getUserByUsername,
   createOrUpdateUser,
   recordMatchOutcome,
   adjustSecretTrustFactor,
@@ -153,7 +154,7 @@ const socketMoveSchema = z.object({
 
 const socketJoinRoomSchema = z.string({ required_error: 'Room code required' }).trim().min(3).max(30).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid room code format');
 
-const socketUsernameSchema = z.string({ required_error: 'Username required' }).trim().min(1).max(25);
+const socketUsernameSchema = z.string({ required_error: 'Username required' }).trim().min(1).max(30);
 
 const socketAuthSessionSchema = z.object({
   userId: z.string().trim().max(64).optional(),
@@ -283,6 +284,19 @@ const guestAuthIpLimiter = createIpRateLimiter({
 app.post('/api/auth/send-code', sendCodeIpLimiter, validateRequest({ body: sendCodeSchema }), async (req, res) => {
   try {
     const { email, username } = req.body;
+
+    // Enforce Username Uniqueness: prevent 2 users with the same username
+    if (username && typeof username === 'string') {
+      const cleanUsername = username.trim();
+      const existingUser = getUserByUsername(cleanUsername);
+      if (existingUser && (!existingUser.email || existingUser.email.toLowerCase() !== email.trim().toLowerCase())) {
+        return res.status(409).json({
+          success: false,
+          error: `Username "${cleanUsername}" is already taken by another player. Please choose a different username.`
+        });
+      }
+    }
+
     const result = await sendVerificationCode(email, username);
     if (result.rateLimited) {
       if (result.retryAfterSeconds) res.setHeader('Retry-After', result.retryAfterSeconds);
@@ -299,6 +313,19 @@ app.post('/api/auth/send-code', sendCodeIpLimiter, validateRequest({ body: sendC
 app.post('/api/auth/verify-code', verifyCodeIpLimiter, validateRequest({ body: verifyCodeSchema }), async (req, res) => {
   try {
     const { email, code, username } = req.body;
+
+    // Enforce Username Uniqueness: prevent 2 users with the same username
+    if (username && typeof username === 'string') {
+      const cleanUsername = username.trim();
+      const existingUser = getUserByUsername(cleanUsername);
+      if (existingUser && (!existingUser.email || existingUser.email.toLowerCase() !== email.trim().toLowerCase())) {
+        return res.status(409).json({
+          success: false,
+          error: `Username "${cleanUsername}" is already taken by another player. Please choose a different username.`
+        });
+      }
+    }
+
     const result = await verifyCode(email, code, username);
     if (!result.success) {
       if (result.rateLimited || result.locked) {
@@ -308,12 +335,20 @@ app.post('/api/auth/verify-code', verifyCodeIpLimiter, validateRequest({ body: v
       return res.status(400).json(result);
     }
 
-    const user = await createOrUpdateUser({
-      id: result.user.id,
-      email: result.user.email,
-      username: username || result.user.username,
-      isGuest: false
-    });
+    let user;
+    try {
+      user = await createOrUpdateUser({
+        id: result.user.id,
+        email: result.user.email,
+        username: username || result.user.username,
+        isGuest: false
+      });
+    } catch (createErr) {
+      if (createErr.code === 'USERNAME_TAKEN' || createErr.status === 409) {
+        return res.status(409).json({ success: false, error: createErr.message });
+      }
+      throw createErr;
+    }
 
     // Set secure HttpOnly cookie (cannot be accessed or copied via browser console / document.cookie)
     res.cookie('chess_session', user.id, {
@@ -1026,17 +1061,36 @@ io.on('connection', (socket) => {
     }
   }, socketAuthSessionSchema);
 
-  // Set username
-  safeListener(socket, 'set_username', (name) => {
+  // Set username (Enforces uniqueness across all registered players and persists to disk)
+  safeListener(socket, 'set_username', async (name) => {
     if (typeof name === 'string' && name.trim().length > 0) {
-      const clean = name.trim().replace(/[^\w\s-]/g, '').substring(0, 20);
-      if (clean.length > 0) {
-        socket.data.username = clean;
-        if (socket.userId) {
-          const u = getUserById(socket.userId);
-          if (u) {
+      const clean = name.trim().replace(/[^\w\s-]/g, '').substring(0, 30);
+      if (clean.length > 0 && socket.userId) {
+        const existing = getUserByUsername(clean);
+        if (existing && existing.id !== socket.userId) {
+          socket.emit('username_error', { message: `Username "${clean}" is already taken by another player.` });
+          return;
+        }
+
+        const u = getUserById(socket.userId);
+        if (u) {
+          try {
+            await createOrUpdateUser({
+              id: u.id,
+              email: u.email,
+              username: clean,
+              accepted_terms: u.accepted_terms
+            });
             u.username = clean;
             socket.user = u;
+            socket.data.username = clean;
+            console.log(`[Username Updated] User ${u.id} changed username to "${clean}" and saved to disk.`);
+            socket.emit('username_updated', {
+              username: clean,
+              profile: getPublicProfile(u.id)
+            });
+          } catch (err) {
+            socket.emit('username_error', { message: err.message });
           }
         }
       }

@@ -84,9 +84,10 @@ async function runMandatoryAuthGateTests() {
   testAssert(fakeTokenErrorMsg.includes('Authentication failed'), `Invalid token error confirmed: "${fakeTokenErrorMsg}"`);
 
   // 3C: Connection with guest user ID must fail handshake
+  const guestUsername = `IllegalGuest_${Date.now()}`;
   const guestUser = await createOrUpdateUser({
     id: `gst_test_${Date.now()}`,
-    username: 'IllegalGuest',
+    username: guestUsername,
     isGuest: true
   });
 
@@ -110,10 +111,11 @@ async function runMandatoryAuthGateTests() {
 
   // TEST 4: Verified User Creation & Mandatory Privacy Agreement Acceptance
   console.log('\n--- Test 4: Mandatory Privacy & Fair-Play Agreement Acceptance ---');
+  const verifiedUsername = `TournamentPro_${Date.now()}`;
   const verifiedUser = await createOrUpdateUser({
     id: `usr_verified_${Date.now()}`,
     email: `player_${Date.now()}@gmail.com`,
-    username: 'TournamentPro',
+    username: verifiedUsername,
     isGuest: false,
     accepted_terms: false
   });
@@ -154,7 +156,7 @@ async function runMandatoryAuthGateTests() {
   await wait(600);
   testAssert(authedSocket.connected, 'Verified user successfully passed handshake and established connection');
   testAssert(authSuccessEmitted, 'Server emitted auth_success for verified user');
-  testAssert(receivedProfile && receivedProfile.username === 'TournamentPro', 'User profile correctly bound to socket');
+  testAssert(receivedProfile && receivedProfile.username === verifiedUsername, 'User profile correctly bound to socket');
 
   // Enter matchmaking as verified user
   let queueJoined = false;

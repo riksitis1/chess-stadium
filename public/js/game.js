@@ -234,6 +234,30 @@ function initSocket(token) {
     }
   });
 
+  socket.on('username_error', (data) => {
+    alert(data.message || 'Username already taken. Please choose another handle.');
+    if (currentUser && currentUser.username && inputUsername) {
+      inputUsername.value = currentUser.username;
+    }
+    if (btnSaveUsername) {
+      btnSaveUsername.disabled = false;
+      btnSaveUsername.textContent = 'Set';
+    }
+  });
+
+  socket.on('username_updated', (data) => {
+    if (data && data.profile) {
+      currentUser = { ...currentUser, ...data.profile };
+      localStorage.setItem('chess_auth_user', JSON.stringify(currentUser));
+      updateCurrentUser(currentUser);
+    }
+    if (btnSaveUsername) {
+      btnSaveUsername.disabled = false;
+      btnSaveUsername.textContent = 'Saved!';
+      setTimeout(() => { btnSaveUsername.textContent = 'Set'; }, 1500);
+    }
+  });
+
   socket.on('elo_updated', (data) => {
     handleEloUpdated(data);
   });
@@ -2086,9 +2110,16 @@ btnCopyRoomCode.addEventListener('click', () => {
 });
 
 btnSaveUsername.addEventListener('click', () => {
-  sendUsername();
-  btnSaveUsername.textContent = 'Saved!';
-  setTimeout(() => { btnSaveUsername.textContent = 'Set'; }, 1500);
+  const newName = inputUsername.value.trim();
+  if (!newName) return;
+  if (currentUser && currentUser.username === newName) {
+    btnSaveUsername.textContent = 'Saved!';
+    setTimeout(() => { btnSaveUsername.textContent = 'Set'; }, 1500);
+    return;
+  }
+  btnSaveUsername.disabled = true;
+  btnSaveUsername.textContent = 'Saving...';
+  socket.emit('set_username', newName);
 });
 
 btnOfferDraw.addEventListener('click', () => {

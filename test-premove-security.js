@@ -22,8 +22,9 @@ async function run() {
     });
   }
 
-  const p1 = await createPlayer('Alice');
-  const p2 = await createPlayer('Bob');
+  const tag = Date.now();
+  const p1 = await createPlayer(`Alice_${tag}`);
+  const p2 = await createPlayer(`Bob_${tag}`);
   console.log('✓ Both players connected');
 
   let matchData1 = null;

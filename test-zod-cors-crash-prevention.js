@@ -88,8 +88,9 @@ async function runHardeningTests() {
   const { createOrUpdateUser, recordMatchOutcome, getUserById } = require('./users');
 
   // Create two test players
-  const u1 = await createOrUpdateUser({ username: 'Race_Player1', isGuest: true });
-  const u2 = await createOrUpdateUser({ username: 'Race_Player2', isGuest: true });
+  const tag = Date.now();
+  const u1 = await createOrUpdateUser({ username: `Race_Player1_${tag}`, isGuest: true });
+  const u2 = await createOrUpdateUser({ username: `Race_Player2_${tag}`, isGuest: true });
 
   const initialElo1 = u1.elo;
   const initialElo2 = u2.elo;

@@ -123,10 +123,11 @@ async function runAuthRateLimitTests() {
   // Test 4: Legitimate Login Flow Works 100% with Valid Code
   console.log('\n--- Test 4: Legitimate Login Flow with Valid Code ---');
   const legitEmail = `legit_gm_${Date.now()}@gmail.com`;
+  const legitUsername = `LegitGM_${Date.now()}`;
   const legitSendRes = await fetch(`${BASE_URL}/api/auth/send-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: legitEmail, username: 'LegitGrandmaster' })
+    body: JSON.stringify({ email: legitEmail, username: legitUsername })
   });
   const legitSendData = await legitSendRes.json();
   const legitCode = legitSendData.devCode;
@@ -134,12 +135,12 @@ async function runAuthRateLimitTests() {
   const legitVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: legitEmail, code: legitCode, username: 'LegitGrandmaster' })
+    body: JSON.stringify({ email: legitEmail, code: legitCode, username: legitUsername })
   });
   const legitVerifyData = await legitVerifyRes.json();
   assert.strictEqual(legitVerifyRes.status, 200, 'Valid code must return 200 OK');
   assert.strictEqual(legitVerifyData.success, true);
-  assert.strictEqual(legitVerifyData.profile.username, 'LegitGrandmaster');
+  assert.strictEqual(legitVerifyData.profile.username, legitUsername);
   console.log('✅ [PASS] Legitimate user verified and authenticated on first attempt.');
 
   console.log('\n====================================================');
