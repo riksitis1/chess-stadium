@@ -1,0 +1,19 @@
+# Environment variables and secrets (CRITICAL: NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# Node modules
+node_modules/
+
+# Local databases and runtime state
+data/
+*.sqlite
+*.log
+
+# Operating system files
+.DS_Store
+Thumbs.db
