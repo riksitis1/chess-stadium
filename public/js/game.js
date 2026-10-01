@@ -248,7 +248,7 @@ function initSocket() {
   });
 
   socket.on('tunnel_updated', (data) => {
-    if (data && data.url) {
+    if (cloudflareBanner && cfUrlText && data && data.url) {
       cloudflareBanner.classList.remove('hidden');
       cfUrlText.textContent = data.url;
       cfUrlText.href = data.url;
@@ -1970,13 +1970,15 @@ btnSoundToggle.addEventListener('click', () => {
   soundIcon.textContent = isMuted ? '🔇' : '🔊';
 });
 
-btnCopyCfUrl.addEventListener('click', () => {
-  const url = cfUrlText.textContent;
-  navigator.clipboard.writeText(url).then(() => {
-    btnCopyCfUrl.textContent = 'Link Copied!';
-    setTimeout(() => { btnCopyCfUrl.textContent = 'Copy Share Link'; }, 2000);
+if (btnCopyCfUrl && cfUrlText) {
+  btnCopyCfUrl.addEventListener('click', () => {
+    const url = cfUrlText.textContent;
+    navigator.clipboard.writeText(url).then(() => {
+      btnCopyCfUrl.textContent = 'Link Copied!';
+      setTimeout(() => { btnCopyCfUrl.textContent = 'Copy Share Link'; }, 2000);
+    });
   });
-});
+}
 
 // Fullscreen & Flip Toolbar buttons
 if (btnToggleFullscreen) {
@@ -2002,7 +2004,7 @@ if (btnFlipBoard) {
 fetch('/api/tunnel-info')
   .then(res => res.json())
   .then(data => {
-    if (data.cloudflareUrl) {
+    if (cloudflareBanner && cfUrlText && data.cloudflareUrl) {
       cloudflareBanner.classList.remove('hidden');
       cfUrlText.textContent = data.cloudflareUrl;
       cfUrlText.href = data.cloudflareUrl;

@@ -76,7 +76,7 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
-let cloudflareUrl = process.env.CLOUDFLARE_TUNNEL_URL || 'https://drawings-sheep-ira-geography.trycloudflare.com';
+let cloudflareUrl = process.env.CLOUDFLARE_TUNNEL_URL || null;
 
 // Strict CORS middleware for Express REST endpoints
 app.use((req, res, next) => {
