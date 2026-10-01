@@ -8,8 +8,8 @@ function wait(ms) {
 
 async function testFlagfall() {
   console.log('Testing instant automatic flag-fall termination...');
-  const s1 = io(SERVER_URL, { forceNew: true });
-  const s2 = io(SERVER_URL, { forceNew: true });
+  const s1 = io(SERVER_URL, { forceNew: true, auth: { token: 'usr_74657374706c6179' } });
+  const s2 = io(SERVER_URL, { forceNew: true, auth: { token: 'usr_7375706572676d40' } });
 
   let gameData = null;
   s1.on('match_found', d => { gameData = d; });

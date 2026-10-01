@@ -2,8 +2,8 @@ const { io } = require('socket.io-client');
 
 console.log('♟️ Starting Pawn Promotion Verification Test...');
 
-const p1 = io('http://localhost:3000');
-const p2 = io('http://localhost:3000');
+const p1 = io('http://localhost:3000', { auth: { token: 'usr_74657374706c6179' } });
+const p2 = io('http://localhost:3000', { auth: { token: 'usr_7375706572676d40' } });
 
 let whiteSocket = null;
 let blackSocket = null;

@@ -2,8 +2,8 @@ const { io } = require('socket.io-client');
 
 console.log('🧪 Starting E2E Multiplayer & Anti-Cheat Test...');
 
-const p1 = io('http://localhost:3000');
-const p2 = io('http://localhost:3000');
+const p1 = io('http://localhost:3000', { auth: { token: 'usr_74657374706c6179' } });
+const p2 = io('http://localhost:3000', { auth: { token: 'usr_7375706572676d40' } });
 
 let p1Data = null;
 let p2Data = null;
@@ -52,24 +52,28 @@ function checkStart() {
       blackSocket.once('move_made', (move2Data) => {
         console.log(`✅ Move e7-e5 confirmed by server: SAN=${move2Data.move.san}`);
 
-        // Now test Anti-Cheat: White switches tabs
-        console.log('🚨 Simulating Player tab switch (anti_cheat_event: tab_hidden)...');
-        whiteSocket.emit('anti_cheat_event', { type: 'tab_hidden' });
+        // Now test Anti-Cheat: White triggers security violation
+        console.log('🚨 Simulating Player security violation (anti_cheat_event: unauthorized_dom_injection)...');
+        whiteSocket.emit('anti_cheat_event', { type: 'unauthorized_dom_injection' });
 
         whiteSocket.once('anti_cheat_strike', (strikeData) => {
           console.log(`⚠️ Anti-Cheat Strike 1 confirmed: ${strikeData.playerName} strikes=${strikeData.strikes}/${strikeData.maxStrikes}`);
 
-          // Emit strike 2
-          console.log('🚨 Simulating 2nd tab switch...');
-          whiteSocket.emit('anti_cheat_event', { type: 'tab_hidden' });
+          setTimeout(() => {
+            // Emit strike 2
+            console.log('🚨 Simulating 2nd security violation...');
+            whiteSocket.emit('anti_cheat_event', { type: 'unauthorized_dom_injection' });
 
-          whiteSocket.once('anti_cheat_strike', (strike2Data) => {
-            console.log(`⚠️ Anti-Cheat Strike 2 confirmed: strikes=${strike2Data.strikes}/${strike2Data.maxStrikes}`);
+            whiteSocket.once('anti_cheat_strike', (strike2Data) => {
+              console.log(`⚠️ Anti-Cheat Strike 2 confirmed: strikes=${strike2Data.strikes}/${strike2Data.maxStrikes}`);
 
-            // Emit strike 3 -> should cause instant forfeit
-            console.log('🚨 Simulating 3rd tab switch (Disqualification limit)...');
-            whiteSocket.emit('anti_cheat_event', { type: 'tab_hidden' });
-          });
+              setTimeout(() => {
+                // Emit strike 3 -> should cause instant forfeit
+                console.log('🚨 Simulating 3rd security violation (Disqualification limit)...');
+                whiteSocket.emit('anti_cheat_event', { type: 'unauthorized_dom_injection' });
+              }, 3100);
+            });
+          }, 3100);
         });
 
         // Listen for game_over on both

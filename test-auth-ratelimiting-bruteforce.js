@@ -68,9 +68,9 @@ async function runAuthRateLimitTests() {
   const codeSendData = await codeSendRes.json();
   const realCode = codeSendData.devCode;
 
-  // Simulate attacker attempting 5 wrong guesses
+  // Simulate attacker attempting wrong guesses (3-attempt threshold)
   console.log('Simulating attacker cycling through incorrect OTP guesses...');
-  const fakeGuesses = ['000001', '000002', '000003', '000004'];
+  const fakeGuesses = ['000001', '000002'];
 
   for (let i = 0; i < fakeGuesses.length; i++) {
     const guessRes = await fetch(`${BASE_URL}/api/auth/verify-code`, {
@@ -80,22 +80,22 @@ async function runAuthRateLimitTests() {
     });
     const guessData = await guessRes.json();
     assert.strictEqual(guessRes.status, 400);
-    assert.strictEqual(guessData.attemptsRemaining, 4 - i);
+    assert.strictEqual(guessData.attemptsRemaining, 2 - i);
     console.log(`  Guess ${i + 1} (${fakeGuesses[i]}): Rejected, ${guessData.attemptsRemaining} attempt(s) remaining.`);
   }
 
-  // 5th failed guess: Must trigger immediate revocation & lockout!
-  console.log('Sending 5th failed guess (threshold limit)...');
-  const guess5Res = await fetch(`${BASE_URL}/api/auth/verify-code`, {
+  // 3rd failed guess: Must trigger immediate revocation & 15-minute lockout!
+  console.log('Sending 3rd failed guess (strict 3-attempt threshold limit)...');
+  const guess3Res = await fetch(`${BASE_URL}/api/auth/verify-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: bruteEmail, code: '999999', username: 'BruteTarget' })
   });
-  const guess5Data = await guess5Res.json();
-  assert.strictEqual(guess5Res.status, 429, '5th failed attempt must return HTTP 429 Too Many Requests');
-  assert.strictEqual(guess5Data.locked, true, 'Account must be marked locked');
-  assert.strictEqual(guess5Data.attemptsRemaining, 0);
-  console.log('✅ [PASS] 5th failed attempt triggered HTTP 429 & 15-minute account lockout.');
+  const guess3Data = await guess3Res.json();
+  assert.strictEqual(guess3Res.status, 429, '3rd failed attempt must return HTTP 429 Too Many Requests');
+  assert.strictEqual(guess3Data.locked, true, 'Account must be marked locked');
+  assert.strictEqual(guess3Data.attemptsRemaining, 0);
+  console.log('✅ [PASS] 3rd failed attempt triggered HTTP 429 & 15-minute account lockout.');
 
   // Even if attacker now submits the real code, it must be rejected because it was revoked!
   console.log('Testing submission of original code after lockout...');

@@ -73,15 +73,14 @@ const linkPrivacy = document.getElementById('link-privacy');
 const btnClosePrivacy = document.getElementById('btn-close-privacy');
 const btnPrivacyOk = document.getElementById('btn-privacy-ok');
 
-// Auth Modal DOM
+// Auth Modal & Agreement Gate DOM
 const authModal = document.getElementById('auth-modal');
-const btnCloseAuth = document.getElementById('btn-close-auth');
 const authStepEmail = document.getElementById('auth-step-email');
 const authStepOtp = document.getElementById('auth-step-otp');
+const authStepTerms = document.getElementById('auth-step-terms');
 const inputAuthEmail = document.getElementById('auth-email');
 const inputAuthUsername = document.getElementById('auth-username');
 const btnSendCode = document.getElementById('btn-send-code');
-const btnAuthGuest = document.getElementById('btn-auth-guest');
 const inputAuthOtp = document.getElementById('auth-otp-code');
 const btnVerifyCode = document.getElementById('btn-verify-code');
 const btnChangeEmail = document.getElementById('btn-change-email');
@@ -89,7 +88,11 @@ const btnResendCode = document.getElementById('btn-resend-code');
 const authTargetEmail = document.getElementById('auth-target-email');
 const authMsgStep1 = document.getElementById('auth-msg-step1');
 const authMsgStep2 = document.getElementById('auth-msg-step2');
+const authMsgStep3 = document.getElementById('auth-msg-step3');
+const chkAcceptTerms = document.getElementById('chk-accept-terms');
+const btnMandatoryAgree = document.getElementById('btn-mandatory-agree');
 const linkAuthPolicy = document.getElementById('link-auth-policy');
+const appContainer = document.getElementById('app-container');
 
 // Header & Lobby Profile DOM
 const btnHeaderSignin = document.getElementById('btn-header-signin');
@@ -177,25 +180,36 @@ const btnDeclineDraw = document.getElementById('btn-decline-draw');
 const btnSoundToggle = document.getElementById('btn-sound-toggle');
 const soundIcon = document.getElementById('sound-icon');
 
-// Initialize Socket.io
-function initSocket() {
-  socket = io();
+// Initialize Socket.io with mandatory token verification in handshake
+function initSocket(token) {
+  const authToken = token || localStorage.getItem('chess_auth_token');
+  if (!authToken) {
+    console.warn('[Socket] Refusing to connect: No auth token provided.');
+    return;
+  }
+
+  if (socket && socket.connected) return;
+  if (socket) {
+    socket.disconnect();
+  }
+
+  socket = io({
+    auth: {
+      token: authToken
+    },
+    transports: ['websocket', 'polling']
+  });
+
+  socket.on('connect_error', (err) => {
+    console.warn('[Socket Handshake Error]', err.message);
+    if (err.message && err.message.toLowerCase().includes('auth')) {
+      signOut();
+    }
+  });
 
   socket.on('connect', () => {
-    console.log('[Socket] Connected to server ID:', socket.id);
-    
-    // Authenticate session from localStorage
-    const savedToken = localStorage.getItem('chess_auth_token');
-    const savedUserRaw = localStorage.getItem('chess_auth_user');
-    let savedUser = null;
-    try { savedUser = JSON.parse(savedUserRaw); } catch (e) {}
-
-    if (savedToken && savedUser) {
-      socket.emit('auth_session', { userId: savedToken, username: savedUser.username });
-    } else {
-      socket.emit('auth_session', { username: inputUsername.value.trim() });
-    }
-
+    console.log('[Socket] Authenticated connection established:', socket.id);
+    socket.emit('auth_session', { userId: authToken });
     sendUsername();
 
     // Check URL parameters for room code invite (e.g. ?room=ROOM_ABC)
@@ -205,6 +219,11 @@ function initSocket() {
       inputRoomCode.value = joinCode.toUpperCase();
       socket.emit('join_room', joinCode);
     }
+  });
+
+  socket.on('auth_error', (data) => {
+    console.warn('[Socket Auth Error]', data.message);
+    signOut();
   });
 
   socket.on('auth_success', (data) => {
@@ -406,6 +425,7 @@ function startMatch(data) {
   renderBoard();
   updateClockDisplays();
   startLocalClockTicker();
+  startHeartbeat();
 
   sounds.playMatchStart();
 }
@@ -1309,6 +1329,7 @@ function renderCapturedTray(element, pieceList, diffText) {
 function handleGameOver(data) {
   gameStatus = 'ended';
   if (clockInterval) clearInterval(clockInterval);
+  stopHeartbeat();
 
   const isWin = data.winner === playerColor;
   const isDraw = !data.winner;
@@ -1348,6 +1369,28 @@ function handleGameOver(data) {
 // ==========================================
 // ADVANCED ANTI-CHEAT CLIENT SYSTEM
 // ==========================================
+
+// Authoritative Focus & Telemetry Heartbeat Ping (Requirement 4)
+let heartbeatInterval = null;
+
+function startHeartbeat() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => {
+    if (socket && socket.connected && gameStatus === 'in_progress') {
+      socket.emit('client_heartbeat', {
+        focused: document.visibilityState === 'visible' && document.hasFocus(),
+        timestamp: Date.now()
+      });
+    }
+  }, 3000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+}
 
 // Anti-Cheat State & Mouse Biometric Tracking
 let mouseMovesInTurn = 0;
@@ -1577,10 +1620,13 @@ function showAuthMsg(el, msg, type = 'info') {
 function openAuthModal() {
   if (authModal) {
     authModal.classList.remove('hidden');
-    authStepEmail.classList.remove('hidden');
-    authStepOtp.classList.add('hidden');
+    if (!currentUser || !currentUser.accepted_terms) {
+      authModal.classList.add('auth-lockout-backdrop');
+      showAuthStep('email');
+    }
     showAuthMsg(authMsgStep1, '', 'hidden');
     showAuthMsg(authMsgStep2, '', 'hidden');
+    showAuthMsg(authMsgStep3, '', 'hidden');
     if (inputAuthUsername && currentUser) {
       inputAuthUsername.value = currentUser.username;
     }
@@ -1589,7 +1635,47 @@ function openAuthModal() {
 }
 
 function closeAuthModal() {
-  if (authModal) authModal.classList.add('hidden');
+  if (currentUser && currentUser.accepted_terms) {
+    if (authModal) {
+      authModal.classList.add('hidden');
+      authModal.classList.remove('auth-lockout-backdrop');
+    }
+  }
+}
+
+function lockAppForUnauthenticated() {
+  if (appContainer) {
+    appContainer.setAttribute('inert', '');
+    appContainer.classList.add('auth-locked');
+  }
+  if (authModal) {
+    authModal.classList.remove('hidden');
+    authModal.classList.add('auth-lockout-backdrop');
+  }
+  showAuthStep('email');
+}
+
+function unlockApp() {
+  if (appContainer) {
+    appContainer.removeAttribute('inert');
+    appContainer.classList.remove('auth-locked');
+  }
+  if (authModal) {
+    authModal.classList.add('hidden');
+    authModal.classList.remove('auth-lockout-backdrop');
+  }
+}
+
+function showAuthStep(step) {
+  if (authStepEmail) authStepEmail.classList.toggle('hidden', step !== 'email');
+  if (authStepOtp) authStepOtp.classList.toggle('hidden', step !== 'otp');
+  if (authStepTerms) authStepTerms.classList.toggle('hidden', step !== 'terms');
+}
+
+function completeAuthentication(token, profile) {
+  updateCurrentUser(profile);
+  unlockApp();
+  initSocket(token);
 }
 
 function openProfileModal() {
@@ -1647,8 +1733,7 @@ async function sendAuthCode() {
     const data = await res.json();
 
     if (data.success) {
-      authStepEmail.classList.add('hidden');
-      authStepOtp.classList.remove('hidden');
+      showAuthStep('otp');
       if (authTargetEmail) authTargetEmail.textContent = email;
       showAuthMsg(authMsgStep2, data.message || 'Verification code sent to your Gmail inbox!', 'info');
       startResendCountdown();
@@ -1686,13 +1771,18 @@ async function verifyAuthCode() {
     const data = await res.json();
 
     if (data.success && data.profile) {
+      currentUser = data.profile;
       localStorage.setItem('chess_auth_token', data.token);
       localStorage.setItem('chess_auth_user', JSON.stringify(data.profile));
-      updateCurrentUser(data.profile);
-      socket.emit('auth_session', { userId: data.token, username: data.profile.username });
 
-      authModal.classList.add('hidden');
-      showAuthMsg(authMsgStep2, '', 'hidden');
+      // Check if user has already accepted the Privacy & Fair-Play Agreement
+      if (data.profile.accepted_terms) {
+        localStorage.setItem('chess_accepted_terms', 'true');
+        completeAuthentication(data.token, data.profile);
+      } else {
+        // Proceed to mandatory Step 3: Privacy & Fair-Play Agreement Gate
+        showAuthStep('terms');
+      }
     } else {
       showAuthMsg(authMsgStep2, data.error || 'Invalid code. Please try again.', 'error');
     }
@@ -1700,34 +1790,104 @@ async function verifyAuthCode() {
     showAuthMsg(authMsgStep2, 'Verification error. Please try again.', 'error');
   } finally {
     btnVerifyCode.disabled = false;
-    btnVerifyCode.innerHTML = '<span>✓</span> Verify Code & Enter Stadium';
+    btnVerifyCode.innerHTML = '<span>✓</span> Verify Code & Continue';
   }
 }
 
-async function loginAsGuest() {
+async function acceptTermsAndEnter() {
+  if (chkAcceptTerms && !chkAcceptTerms.checked) {
+    showAuthMsg(authMsgStep3, 'You must check the agreement box to accept tournament terms.', 'error');
+    return;
+  }
+
+  const token = localStorage.getItem('chess_auth_token');
+  if (!token) {
+    showAuthMsg(authMsgStep3, 'Authentication session lost. Please re-enter your email.', 'error');
+    showAuthStep('email');
+    return;
+  }
+
+  btnMandatoryAgree.disabled = true;
+  btnMandatoryAgree.innerHTML = '<span>⏳</span> Recording Agreement...';
+
   try {
-    const username = inputAuthUsername.value.trim() || inputUsername.value.trim() || 'Grandmaster';
-    const res = await fetch('/api/auth/guest', {
+    const res = await fetch('/api/auth/accept-terms', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
     });
+
     const data = await res.json();
     if (data.success && data.profile) {
-      localStorage.setItem('chess_auth_token', data.token);
+      currentUser = data.profile;
       localStorage.setItem('chess_auth_user', JSON.stringify(data.profile));
-      updateCurrentUser(data.profile);
-      socket.emit('auth_session', { userId: data.token, username: data.profile.username });
-      authModal.classList.add('hidden');
+      localStorage.setItem('chess_accepted_terms', 'true');
+      completeAuthentication(token, data.profile);
+    } else {
+      showAuthMsg(authMsgStep3, data.error || 'Failed to record agreement.', 'error');
     }
-  } catch (e) {}
+  } catch (err) {
+    showAuthMsg(authMsgStep3, 'Network error. Please try again.', 'error');
+  } finally {
+    btnMandatoryAgree.disabled = false;
+    btnMandatoryAgree.innerHTML = '<span>🛡️</span> I Understand & Agree • Enter Stadium';
+  }
 }
 
 function signOut() {
   localStorage.removeItem('chess_auth_token');
   localStorage.removeItem('chess_auth_user');
+  localStorage.removeItem('chess_accepted_terms');
+  currentUser = null;
+  if (socket) {
+    socket.disconnect();
+    socket = null;
+  }
   closeProfileModal();
-  loginAsGuest();
+  lockAppForUnauthenticated();
+}
+
+async function checkInitialAuth() {
+  const savedToken = localStorage.getItem('chess_auth_token');
+  const termsAccepted = localStorage.getItem('chess_accepted_terms') === 'true';
+
+  if (!savedToken) {
+    lockAppForUnauthenticated();
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/me', {
+      headers: { 'Authorization': `Bearer ${savedToken}` }
+    });
+    const data = await res.json();
+
+    if (data.success && data.profile && !data.profile.isGuest) {
+      currentUser = data.profile;
+      if (data.profile.accepted_terms || termsAccepted) {
+        completeAuthentication(savedToken, data.profile);
+      } else {
+        lockAppForUnauthenticated();
+        showAuthStep('terms');
+      }
+    } else {
+      localStorage.removeItem('chess_auth_token');
+      localStorage.removeItem('chess_auth_user');
+      localStorage.removeItem('chess_accepted_terms');
+      lockAppForUnauthenticated();
+    }
+  } catch (err) {
+    const savedUserRaw = localStorage.getItem('chess_auth_user');
+    let profile = null;
+    try { profile = JSON.parse(savedUserRaw); } catch (e) {}
+    if (profile && !profile.isGuest && termsAccepted) {
+      completeAuthentication(savedToken, profile);
+    } else {
+      lockAppForUnauthenticated();
+    }
+  }
 }
 
 function updateCurrentUser(profile) {
@@ -1807,7 +1967,6 @@ function handleEloUpdated(data) {
 // Attach Auth & Profile Event Listeners
 if (btnHeaderSignin) btnHeaderSignin.addEventListener('click', openAuthModal);
 if (headerProfilePill) headerProfilePill.addEventListener('click', openProfileModal);
-if (btnCloseAuth) btnCloseAuth.addEventListener('click', closeAuthModal);
 if (btnCloseProfile) btnCloseProfile.addEventListener('click', closeProfileModal);
 if (btnLobbyAuth) btnLobbyAuth.addEventListener('click', () => {
   if (currentUser && !currentUser.isGuest) openProfileModal();
@@ -1825,17 +1984,15 @@ if (profileModal) {
 }
 if (linkAuthPolicy) {
   linkAuthPolicy.addEventListener('click', () => {
-    closeAuthModal();
     openPrivacyModal();
   });
 }
 if (btnSendCode) btnSendCode.addEventListener('click', sendAuthCode);
 if (btnVerifyCode) btnVerifyCode.addEventListener('click', verifyAuthCode);
-if (btnAuthGuest) btnAuthGuest.addEventListener('click', loginAsGuest);
+if (btnMandatoryAgree) btnMandatoryAgree.addEventListener('click', acceptTermsAndEnter);
 if (btnChangeEmail) {
   btnChangeEmail.addEventListener('click', () => {
-    authStepOtp.classList.add('hidden');
-    authStepEmail.classList.remove('hidden');
+    showAuthStep('email');
     showAuthMsg(authMsgStep1, '', 'hidden');
   });
 }
@@ -1856,6 +2013,20 @@ if (inputAuthOtp) {
     if (e.key === 'Enter') verifyAuthCode();
   });
 }
+
+// Global Escape Key Gatekeeper: Prevents dismissing the auth gate modal
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (!currentUser || !currentUser.accepted_terms) {
+      e.preventDefault();
+      e.stopPropagation();
+    } else {
+      closeAuthModal();
+      closePrivacyModal();
+      closeProfileModal();
+    }
+  }
+});
 
 // Privacy & Fair-Play Modal event listeners
 function openPrivacyModal() {
@@ -2098,8 +2269,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }, { once: true, passive: true });
   });
 
-  initSocket();
   renderBoard();
   initDomIntegrityObserver();
   initDevtoolsDetection();
+  checkInitialAuth();
 });

@@ -1,5 +1,6 @@
 const { io } = require('socket.io-client');
 const { Chess } = require('chess.js');
+const { createOrUpdateUser } = require('./users');
 
 const SERVER_URL = 'http://localhost:3000';
 
@@ -14,8 +15,23 @@ async function runDrawsAndClockTest() {
 
   // Test 1: Reconnection within 30-second window
   console.log('--- Test 1: 30-Second Reconnection Window & State Recovery ---');
-  const s1 = io(SERVER_URL, { forceNew: true });
-  const s2 = io(SERVER_URL, { forceNew: true });
+  const user1 = await createOrUpdateUser({
+    id: `usr_recon1_${Date.now()}`,
+    email: `recon1_${Date.now()}@test.local`,
+    username: 'ReconWhite',
+    isGuest: false,
+    accepted_terms: true
+  });
+  const user2 = await createOrUpdateUser({
+    id: `usr_recon2_${Date.now()}`,
+    email: `recon2_${Date.now()}@test.local`,
+    username: 'ReconBlack',
+    isGuest: false,
+    accepted_terms: true
+  });
+
+  const s1 = io(SERVER_URL, { forceNew: true, auth: { token: user1.id } });
+  const s2 = io(SERVER_URL, { forceNew: true, auth: { token: user2.id } });
 
   let actualUser1Id = null;
   let actualUser2Id = null;
@@ -23,8 +39,8 @@ async function runDrawsAndClockTest() {
   s1.on('auth_success', d => { actualUser1Id = d.token; });
   s2.on('auth_success', d => { actualUser2Id = d.token; });
 
-  s1.emit('auth_session', { username: 'ReconWhite' });
-  s2.emit('auth_session', { username: 'ReconBlack' });
+  s1.emit('auth_session', { userId: user1.id, username: 'ReconWhite' });
+  s2.emit('auth_session', { userId: user2.id, username: 'ReconBlack' });
 
   while (!actualUser1Id || !actualUser2Id) {
     await wait(50);
@@ -71,7 +87,7 @@ async function runDrawsAndClockTest() {
 
   // Reconnect with same userId (simulating localStorage / session cookie re-auth)
   console.log('Reconnecting player with new socket ID...');
-  const sReconnected = io(SERVER_URL, { forceNew: true });
+  const sReconnected = io(SERVER_URL, { forceNew: true, auth: { token: whiteUserId } });
   let reconnectedMatchData = null;
 
   sReconnected.on('match_reconnected', data => {
@@ -113,8 +129,8 @@ async function runDrawsAndClockTest() {
 
   // Test 3: Pawn Promotion Validation
   console.log('\n--- Test 3: Pawn Promotion Safety & Piece Specifiers ---');
-  const promoS1 = io(SERVER_URL, { forceNew: true });
-  const promoS2 = io(SERVER_URL, { forceNew: true });
+  const promoS1 = io(SERVER_URL, { forceNew: true, auth: { token: 'usr_74657374706c6179' } });
+  const promoS2 = io(SERVER_URL, { forceNew: true, auth: { token: 'usr_7375706572676d40' } });
   let pGame1 = null;
   let pGame2 = null;
   promoS1.on('match_found', d => { pGame1 = d; });

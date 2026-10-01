@@ -1,16 +1,24 @@
 const { io } = require('socket.io-client');
 const assert = require('assert');
+const { createOrUpdateUser } = require('./users');
 
 async function run() {
   console.log('--- Starting Pre-Move & Security Verification Suite ---');
 
-  function createPlayer(username) {
-    return new Promise((resolve) => {
-      const socket = io('http://localhost:3000', { forceNew: true });
+  async function createPlayer(username) {
+    const user = await createOrUpdateUser({
+      id: `usr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      username,
+      isGuest: false,
+      accepted_terms: true
+    });
+    return new Promise((resolve, reject) => {
+      const socket = io('http://localhost:3000', { forceNew: true, auth: { token: user.id } });
       socket.on('connect', () => {
         socket.emit('set_username', username);
         resolve(socket);
       });
+      socket.on('connect_error', reject);
     });
   }
 

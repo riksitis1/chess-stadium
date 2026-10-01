@@ -35,10 +35,13 @@ const pendingOtps = new Map(); // email -> { code, expiresAt, username }
 
 // Rate Limiting & Anti-Brute-Force Tracking Maps
 const emailCooldowns = new Map(); // email -> lastSentTimestamp (60s cooldown)
+const emailHourlySends = new Map(); // email -> [timestamp, ...] (max 5/hr quota)
 const failedAttempts = new Map(); // email -> { count: number, lockedUntil: number }
 
 const COOLDOWN_MS = 60 * 1000; // 60s cooldown between resending codes to same email
-const MAX_VERIFY_ATTEMPTS = 5; // Max 5 guesses before code revocation & lockout
+const MAX_HOURLY_SENDS = 5; // Max 5 verification codes dispatched per email per hour
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const MAX_VERIFY_ATTEMPTS = 3; // Strict 3-guess maximum before code revocation & lockout
 const LOCKOUT_MS = 15 * 60 * 1000; // 15-minute brute-force lockout
 
 /**
@@ -85,6 +88,22 @@ async function sendVerificationCode(email, username) {
     };
   }
 
+  // 3. Hourly Quota Safeguard: Max 5 attempts per hour per email
+  const oneHourCutoff = now - ONE_HOUR_MS;
+  const hourlyHistory = (emailHourlySends.get(normalizedEmail) || []).filter(t => t > oneHourCutoff);
+  if (hourlyHistory.length >= MAX_HOURLY_SENDS) {
+    const oldest = hourlyHistory[0];
+    const retrySeconds = Math.max(1, Math.ceil((oldest + ONE_HOUR_MS - now) / 1000));
+    return {
+      success: false,
+      rateLimited: true,
+      retryAfterSeconds: retrySeconds,
+      error: `Hourly verification code quota reached (maximum ${MAX_HOURLY_SENDS} codes per hour). Please wait before requesting another code.`
+    };
+  }
+
+  hourlyHistory.push(now);
+  emailHourlySends.set(normalizedEmail, hourlyHistory);
   emailCooldowns.set(normalizedEmail, now);
 
   // If Supabase is fully configured, call Supabase Auth API to dispatch real email OTP

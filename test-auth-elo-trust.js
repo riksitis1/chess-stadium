@@ -63,7 +63,7 @@ async function run() {
 
   function createSocket(token, username) {
     return new Promise((resolve) => {
-      const socket = io(BASE_URL, { forceNew: true });
+      const socket = io(BASE_URL, { forceNew: true, auth: { token } });
       socket.on('connect', () => {
         socket.emit('auth_session', { userId: token, username });
       });

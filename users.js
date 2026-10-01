@@ -59,7 +59,12 @@ loadUsersFromDisk();
  */
 function getUserById(id) {
   if (!id) return null;
-  return usersCache.get(id) || null;
+  let user = usersCache.get(id);
+  if (!user && fs.existsSync(USERS_FILE)) {
+    loadUsersFromDisk();
+    user = usersCache.get(id);
+  }
+  return user || null;
 }
 
 /**
@@ -73,13 +78,21 @@ function getUserByEmail(email) {
       return user;
     }
   }
+  if (fs.existsSync(USERS_FILE)) {
+    loadUsersFromDisk();
+    for (const user of usersCache.values()) {
+      if (user.email && user.email.toLowerCase() === normalized) {
+        return user;
+      }
+    }
+  }
   return null;
 }
 
 /**
  * Create or update a persistent user account
  */
-async function createOrUpdateUser({ id, email, username, isGuest = false }) {
+async function createOrUpdateUser({ id, email, username, isGuest = false, accepted_terms = false }) {
   return runAtomicMutation(async () => {
     const normalizedEmail = email ? email.trim().toLowerCase() : null;
     let user = id ? getUserById(id) : (normalizedEmail ? getUserByEmail(normalizedEmail) : null);
@@ -94,6 +107,7 @@ async function createOrUpdateUser({ id, email, username, isGuest = false }) {
       highestElo: 1200,
       trustFactor: 100, // Hidden secret trust factor (0 to 100)
       isGuest: Boolean(isGuest),
+      accepted_terms: Boolean(accepted_terms),
       gamesPlayed: 0,
       wins: 0,
       losses: 0,
@@ -107,6 +121,7 @@ async function createOrUpdateUser({ id, email, username, isGuest = false }) {
     // Update existing user fields
     if (username && username.trim()) user.username = username.trim();
     if (normalizedEmail) user.email = normalizedEmail;
+    if (accepted_terms !== undefined && accepted_terms !== null) user.accepted_terms = Boolean(accepted_terms);
     user.lastSeenAt = Date.now();
   }
 
@@ -279,7 +294,8 @@ function getPublicProfile(userId) {
     losses: user.losses,
     draws: user.draws,
     winRate: winRate,
-    isGuest: Boolean(user.isGuest)
+    isGuest: Boolean(user.isGuest),
+    accepted_terms: Boolean(user.accepted_terms)
   };
 }
 
@@ -305,6 +321,7 @@ function getPrivateProfile(userId) {
     draws: user.draws,
     winRate: winRate,
     isGuest: Boolean(user.isGuest),
+    accepted_terms: Boolean(user.accepted_terms),
     createdAt: user.createdAt
   };
 }

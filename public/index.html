@@ -100,17 +100,16 @@
     </div>
   </div>
 
-  <!-- Real Sign-In Modal (Supabase Gmail OTP) -->
-  <div id="auth-modal" class="modal-backdrop hidden">
+  <!-- Mandatory Sign-In & Privacy Gate Modal (Supabase Gmail OTP) -->
+  <div id="auth-modal" class="modal-backdrop auth-lockout-backdrop">
     <div class="modal-dialog auth-dialog">
-      <div class="modal-close" id="btn-close-auth">&times;</div>
       
       <!-- STEP 1: Enter Email & Chess Handle -->
       <div id="auth-step-email" class="auth-step">
         <div class="auth-header">
-          <div class="auth-brand-badge">⚡ Official Tournament Network</div>
-          <h2>Sign In to Save Your Rating</h2>
-          <p>Enter your email to receive an official 6-digit verification code. Your Elo rating, win rate, and match records will be permanently saved.</p>
+          <div class="auth-brand-badge">🛡️ Mandatory Tournament Authentication</div>
+          <h2>Sign In to Enter Stadium</h2>
+          <p>Chess Stadium requires a verified account to enforce anti-cheat integrity, protect human competition, and permanently store your Elo rating.</p>
         </div>
 
         <div id="auth-msg-step1" class="auth-message-box hidden"></div>
@@ -137,12 +136,6 @@
           </button>
         </form>
 
-        <div class="auth-divider"><span>OR PLAY ANONYMOUSLY</span></div>
-
-        <button id="btn-auth-guest" class="btn btn-secondary full-width">
-          <span>⚡</span> Quick Play as Guest (1200 Elo)
-        </button>
-
         <div class="auth-footer-links">
           <span>🔒 Secured via Supabase Auth</span>
           <span class="auth-link" id="link-auth-policy">Privacy & Fair-Play Policy</span>
@@ -168,7 +161,7 @@
           </div>
 
           <button id="btn-verify-code" class="btn btn-primary full-width">
-            <span>✓</span> Verify Code & Enter Stadium
+            <span>✓</span> Verify Code & Continue
           </button>
         </form>
 
@@ -176,6 +169,39 @@
           <button id="btn-change-email" class="auth-link">← Change Email</button>
           <button id="btn-resend-code" class="auth-link">Resend Code (60s)</button>
         </div>
+      </div>
+
+      <!-- STEP 3: Mandatory Privacy Policy & Fair-Play Agreement Gate -->
+      <div id="auth-step-terms" class="auth-step hidden">
+        <div class="auth-header">
+          <div class="auth-brand-badge">🛡️ Mandatory Fair-Play Agreement</div>
+          <h2>Privacy Policy & Fair-Play Agreement</h2>
+          <p>You must review and accept the official tournament regulations before entering Chess Stadium.</p>
+        </div>
+
+        <div class="terms-scroll-box">
+          <h4>1. Strict Anti-Cheat & Fair Play</h4>
+          <p>Use of external chess engines (Stockfish, LC0), browser extensions, bots, or automated macros is strictly prohibited. Gameplay telemetry and move variance are monitored in real time.</p>
+          
+          <h4>2. Authoritative Tab & Focus Monitoring</h4>
+          <p>Leaving the game tab for more than 15 seconds during a live match will result in an automatic abandonment forfeit. All clock and move calculations are strictly server-authoritative.</p>
+
+          <h4>3. Privacy & Zero-Tracking Commitment</h4>
+          <p>We do not sell personal data or utilize advertising trackers. Your email is used exclusively for secure passwordless login, and your rating and match history are encrypted and stored safely.</p>
+        </div>
+
+        <div class="terms-checkbox-group">
+          <label class="terms-checkbox-label">
+            <input type="checkbox" id="chk-accept-terms" checked>
+            <span>I have read, understand, and agree to the <strong>Privacy Policy & Fair-Play Regulations</strong>.</span>
+          </label>
+        </div>
+
+        <div id="auth-msg-step3" class="auth-message-box hidden"></div>
+
+        <button id="btn-mandatory-agree" class="btn btn-primary full-width">
+          <span>🛡️</span> I Understand & Agree • Enter Stadium
+        </button>
       </div>
 
     </div>
@@ -224,8 +250,8 @@
     </div>
   </div>
 
-  <!-- Main App Layout -->
-  <div class="app-container">
+  <!-- Main App Layout (Locked by default until authenticated) -->
+  <div class="app-container auth-locked" id="app-container" inert>
     
     <!-- Top Navigation Bar -->
     <header class="app-header">
@@ -354,7 +380,7 @@
             <div class="lobby-user-details">
               <div class="lobby-user-top">
                 <strong id="lobby-username">Grandmaster</strong>
-                <span class="badge-guest" id="lobby-guest-tag">Guest</span>
+                <span class="badge-verified" id="lobby-guest-tag">✓ Verified</span>
               </div>
               <div class="lobby-user-bottom">
                 <span class="lobby-elo-highlight" id="lobby-elo-val">1200 Elo</span>
